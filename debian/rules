@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+include /usr/share/dpkg/default.mk
+DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+
+%:
+	dh $@ --buildsystem=cmake
+
+override_dh_auto_configure:
+	dh_auto_configure -- \
+	  -DCMAKE_BUILD_TYPE=Release \
+	  -DCMAKE_INSTALL_PREFIX=/usr \
+	  -DNCNN_SHARED_LIB=ON \
+	  -DNCNN_ENABLE_LTO=ON \
+	  -DNCNN_VULKAN=ON \
+	  -DNCNN_BUILD_BENCHMARK=OFF \
+	  -DNCNN_BUILD_EXAMPLES=OFF \
+	  -DNCNN_VERSION=$(shell echo $(DEB_VERSION_UPSTREAM)|awk -F '.' '{ print $$3}') LIB_INSTALL_DIR=/usr/lib/$(DEB_HOST_MULTIARCH)

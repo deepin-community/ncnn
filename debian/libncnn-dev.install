@@ -1,0 +1,3 @@
+usr/include/ncnn/*.h
+usr/lib/*/libncnn.so
+usr/lib/*/pkgconfig/ncnn.pc
