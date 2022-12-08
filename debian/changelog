@@ -1,3 +1,10 @@
+ncnn (1.0.20221128.1-deepin1) unstable; urgency=medium
+
+  * Sync to Upstream
+  * Fix vulkan module cannot use cmake 3.13 to build
+
+ -- WangZhengYang <wangzhengyang@uniontech.com>  Tue, 6 Dec 2022 11:21:54 +0800
+
 ncnn (1.0.20220729+u002) UNRELEASED; urgency=medium
 
   * update

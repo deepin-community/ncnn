@@ -1,0 +1,211 @@
+diff -uNr 2/cmake/ncnnConfig.cmake.in 1/cmake/ncnnConfig.cmake.in
+--- 2/cmake/ncnnConfig.cmake.in	2022-11-28 04:38:26.000000000 +0800
++++ 1/cmake/ncnnConfig.cmake.in	2022-12-08 11:32:05.000000000 +0800
+@@ -19,24 +19,20 @@
+ 
+     if(NOT NCNN_SHARED_LIB)
+         if(NCNN_SYSTEM_GLSLANG)
+-            find_package(glslang QUIET)
+-            if(NOT glslang_FOUND)
+-                set(GLSLANG_TARGET_DIR "@GLSLANG_TARGET_DIR@")
+-                include(${GLSLANG_TARGET_DIR}/OSDependentTargets.cmake)
+-                include(${GLSLANG_TARGET_DIR}/OGLCompilerTargets.cmake)
+-                if(EXISTS "${GLSLANG_TARGET_DIR}/HLSLTargets.cmake")
+-                    # hlsl support can be optional
+-                    include("${GLSLANG_TARGET_DIR}/HLSLTargets.cmake")
+-                endif()
+-                include(${GLSLANG_TARGET_DIR}/glslangTargets.cmake)
+-                include(${GLSLANG_TARGET_DIR}/SPIRVTargets.cmake)
+-            endif()
++            set(GLSLANG_TARGET_DIR "@GLSLANG_TARGET_DIR@")
+         else()
+-            set(glslang_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../@CMAKE_INSTALL_LIBDIR@/cmake/glslang")
+-            find_package(glslang QUIET)
+-        endif()
++            set(GLSLANG_TARGET_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../@CMAKE_INSTALL_LIBDIR@/cmake")
++        endif(NCNN_SYSTEM_GLSLANG)
+ 
++        include(${GLSLANG_TARGET_DIR}/OSDependentTargets.cmake)
++        include(${GLSLANG_TARGET_DIR}/OGLCompilerTargets.cmake)
++        if(EXISTS "${GLSLANG_TARGET_DIR}/HLSLTargets.cmake")
++            # hlsl support can be optional
++            include("${GLSLANG_TARGET_DIR}/HLSLTargets.cmake")
++        endif()
++        include(${GLSLANG_TARGET_DIR}/glslangTargets.cmake)
++        include(${GLSLANG_TARGET_DIR}/SPIRVTargets.cmake)
+     endif()
+-endif()
++endif(NCNN_VULKAN)
+ 
+ include(${CMAKE_CURRENT_LIST_DIR}/ncnn.cmake)
+diff -uNr 2/glslang/CMakeLists.txt 1/glslang/CMakeLists.txt
+--- 2/glslang/CMakeLists.txt	2022-11-28 04:38:28.000000000 +0800
++++ 1/glslang/CMakeLists.txt	2022-12-08 11:26:10.000000000 +0800
+@@ -33,7 +33,7 @@
+ 
+ # increase to 3.1 once all major distributions
+ # include a version of CMake >= 3.1
+-cmake_minimum_required(VERSION 3.14.0)
++cmake_minimum_required(VERSION 3.13.0)
+ if (POLICY CMP0048)
+   cmake_policy(SET CMP0048 NEW)
+ endif()
+diff -uNr 2/glslang/glslang/CMakeLists.txt 1/glslang/glslang/CMakeLists.txt
+--- 2/glslang/glslang/CMakeLists.txt	2022-11-28 04:38:28.000000000 +0800
++++ 1/glslang/glslang/CMakeLists.txt	2022-12-08 11:29:53.000000000 +0800
+@@ -202,30 +202,20 @@
+ # install
+ ################################################################################
+ if(ENABLE_GLSLANG_INSTALL)
+-    install(TARGETS glslang EXPORT glslang-targets)
+-    if(NOT BUILD_SHARED_LIBS)
+-        install(TARGETS MachineIndependent EXPORT glslang-targets)
+-        install(TARGETS GenericCodeGen EXPORT glslang-targets)
+-
+-        # Backward compatibility
+-        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/glslangTargets.cmake" "
+-            message(WARNING \"Using `glslangTargets.cmake` is deprecated: use `find_package(glslang)` to find glslang CMake targets.\")
+-
+-            if (NOT TARGET glslang::glslang)
+-                include(\"\${CMAKE_CURRENT_LIST_DIR}/../../${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}/glslang-targets.cmake\")
+-            endif()
+-
+-            if(${BUILD_SHARED_LIBS})
+-                add_library(glslang ALIAS glslang::glslang)
+-            else()
+-                add_library(glslang ALIAS glslang::glslang)
+-                add_library(MachineIndependent ALIAS glslang::MachineIndependent)
+-                add_library(GenericCodeGen ALIAS glslang::GenericCodeGen)
+-            endif()
+-        ")
+-        install(FILES "${CMAKE_CURRENT_BINARY_DIR}/glslangTargets.cmake" DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake)
++    if(BUILD_SHARED_LIBS)
++        install(TARGETS glslang
++                EXPORT  glslangTargets
++                ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
++                LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
++                RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++    else()
++        install(TARGETS glslang MachineIndependent GenericCodeGen
++                EXPORT  glslangTargets
++                ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+     endif()
+ 
++    install(EXPORT glslangTargets DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake)
++
+     set(ALL_HEADERS
+         ${GLSLANG_HEADERS}
+         ${MACHINEINDEPENDENT_HEADERS})
+diff -uNr 2/glslang/glslang/OSDependent/Unix/CMakeLists.txt 1/glslang/glslang/OSDependent/Unix/CMakeLists.txt
+--- 2/glslang/glslang/OSDependent/Unix/CMakeLists.txt	2022-11-28 04:38:28.000000000 +0800
++++ 1/glslang/glslang/OSDependent/Unix/CMakeLists.txt	2022-12-08 11:27:41.000000000 +0800
+@@ -52,18 +52,8 @@
+     target_link_libraries(OSDependent Threads::Threads)
+ endif()
+ 
+-if(ENABLE_GLSLANG_INSTALL AND NOT BUILD_SHARED_LIBS)
+-    install(TARGETS OSDependent EXPORT glslang-targets)
+-
+-    # Backward compatibility
+-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/OSDependentTargets.cmake" "
+-        message(WARNING \"Using `OSDependentTargets.cmake` is deprecated: use `find_package(glslang)` to find glslang CMake targets.\")
+-
+-        if (NOT TARGET glslang::OSDependent)
+-            include(\"\${CMAKE_CURRENT_LIST_DIR}/../../${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}/glslang-targets.cmake\")
+-        endif()
+-
+-        add_library(OSDependent ALIAS glslang::OSDependent)
+-    ")
+-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/OSDependentTargets.cmake" DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake)
++if(ENABLE_GLSLANG_INSTALL)
++    install(TARGETS OSDependent EXPORT OSDependentTargets
++            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
++	install(EXPORT OSDependentTargets DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake)
+ endif()
+diff -uNr 2/glslang/OGLCompilersDLL/CMakeLists.txt 1/glslang/OGLCompilersDLL/CMakeLists.txt
+--- 2/glslang/OGLCompilersDLL/CMakeLists.txt	2022-11-28 04:38:28.000000000 +0800
++++ 1/glslang/OGLCompilersDLL/CMakeLists.txt	2022-12-08 11:30:34.000000000 +0800
+@@ -41,19 +41,8 @@
+     source_group("Source" FILES ${SOURCES})
+ endif(WIN32)
+ 
+-if(ENABLE_GLSLANG_INSTALL AND NOT BUILD_SHARED_LIBS)
+-    install(TARGETS OGLCompiler EXPORT glslang-targets)
+-
+-    # Backward compatibility
+-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/OGLCompilerTargets.cmake" "
+-        message(WARNING \"Using `OGLCompilerTargets.cmake` is deprecated: use `find_package(glslang)` to find glslang CMake targets.\")
+-
+-        if (NOT TARGET glslang::OGLCompiler)
+-            include(\"\${CMAKE_CURRENT_LIST_DIR}/../../${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}/glslang-targets.cmake\")
+-        endif()
+-
+-        add_library(OGLCompiler ALIAS glslang::OGLCompiler)
+-    ")
+-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/OGLCompilerTargets.cmake" DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake)
+-
+-endif()
++if(ENABLE_GLSLANG_INSTALL)
++    install(TARGETS OGLCompiler EXPORT OGLCompilerTargets
++            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
++	install(EXPORT OGLCompilerTargets DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake)
++endif(ENABLE_GLSLANG_INSTALL)
+diff -uNr 2/glslang/SPIRV/CMakeLists.txt 1/glslang/SPIRV/CMakeLists.txt
+--- 2/glslang/SPIRV/CMakeLists.txt	2022-11-28 04:38:28.000000000 +0800
++++ 1/glslang/SPIRV/CMakeLists.txt	2022-12-08 11:31:29.000000000 +0800
+@@ -110,36 +110,31 @@
+ endif()
+ 
+ if(ENABLE_GLSLANG_INSTALL)
++    if(BUILD_SHARED_LIBS)
+     if (ENABLE_SPVREMAPPER)
+-        install(TARGETS SPVRemapper EXPORT glslang-targets)
++        install(TARGETS SPVRemapper EXPORT SPVRemapperTargets
++                ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
++                LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
++                RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+     endif()
+-
+-    install(TARGETS SPIRV EXPORT glslang-targets)
+-
+-    # Backward compatibility
++    install(TARGETS SPIRV EXPORT SPIRVTargets
++            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
++            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
++            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++else()
+     if (ENABLE_SPVREMAPPER)
+-        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/SPVRemapperTargets.cmake" "
+-            message(WARNING \"Using `SPVRemapperTargets.cmake` is deprecated: use `find_package(glslang)` to find glslang CMake targets.\")
+-
+-            if (NOT TARGET glslang::SPVRemapper)
+-                include(\"\${CMAKE_CURRENT_LIST_DIR}/../../${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}/glslang-targets.cmake\")
+-            endif()
+-
+-            add_library(SPVRemapper ALIAS glslang::SPVRemapper)
+-        ")
+-        install(FILES "${CMAKE_CURRENT_BINARY_DIR}/SPVRemapperTargets.cmake" DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake)
++        install(TARGETS SPVRemapper EXPORT SPVRemapperTargets
++                ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+     endif()
++    install(TARGETS SPIRV EXPORT SPIRVTargets
++            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
++endif()
+ 
+-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/SPIRVTargets.cmake" "
+-        message(WARNING \"Using `SPIRVTargets.cmake` is deprecated: use `find_package(glslang)` to find glslang CMake targets.\")
+-
+-        if (NOT TARGET glslang::SPIRV)
+-            include(\"\${CMAKE_CURRENT_LIST_DIR}/../../${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}/glslang-targets.cmake\")
+-        endif()
++if (ENABLE_SPVREMAPPER)
++    install(EXPORT SPVRemapperTargets DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake)
++endif()
+ 
+-        add_library(SPIRV ALIAS glslang::SPIRV)
+-    ")
+-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/SPIRVTargets.cmake" DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake)
++install(EXPORT SPIRVTargets DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake)
+ 
+     install(FILES ${HEADERS} ${SPVREMAP_HEADERS} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/glslang/SPIRV/)
+ endif()

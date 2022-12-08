@@ -1,14 +1,14 @@
 package:
   id: ncnn
   name: "ncnn"
-  version: 1.0.20220729
+  version: 1.0.20221128
   kind: lib
   description: |
     ncnn is a high-performance neural network inference computing framework optimized for mobile platforms.
 
 base:
   id: org.deepin.base
-  version: 20.5.0
+  version: 23.0.0
 
 depends:
   - id: "vulkan-loader" 
