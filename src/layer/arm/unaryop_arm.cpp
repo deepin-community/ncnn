@@ -360,6 +360,20 @@ struct unary_op_tanh
 #endif // __ARM_NEON
 };
 
+struct unary_op_log10
+{
+    float func(const float& x) const
+    {
+        return (float)log10(x);
+    }
+#if __ARM_NEON
+    float32x4_t func_pack4(const float32x4_t& x) const
+    {
+        return vmulq_f32(log_ps(x), vdupq_n_f32(0.434294481903));
+    }
+#endif // __ARM_NEON
+};
+
 } // namespace UnaryOp_arm_functor
 
 int UnaryOp_arm::forward_inplace(Mat& bottom_top_blob, const Option& opt) const
@@ -429,6 +443,9 @@ int UnaryOp_arm::forward_inplace(Mat& bottom_top_blob, const Option& opt) const
     if (op_type == Operation_TANH)
         return unary_op_inplace<unary_op_tanh>(bottom_top_blob, opt);
 
+    if (op_type == Operation_LOG10)
+        return unary_op_inplace<unary_op_log10>(bottom_top_blob, opt);
+
     return 0;
 }
 
@@ -457,16 +474,16 @@ static int unary_op_inplace_bf16s(Mat& a, const Option& opt)
         {
             uint16x8_t _p01 = vld1q_u16(ptr);
             uint16x8_t _p23 = vld1q_u16(ptr + 8);
-            float32x4_t _p0 = float2bfloat(vget_low_u16(_p01));
-            float32x4_t _p1 = float2bfloat(vget_high_u16(_p01));
-            float32x4_t _p2 = float2bfloat(vget_low_u16(_p23));
-            float32x4_t _p3 = float2bfloat(vget_high_u16(_p23));
+            float32x4_t _p0 = bfloat2float(vget_low_u16(_p01));
+            float32x4_t _p1 = bfloat2float(vget_high_u16(_p01));
+            float32x4_t _p2 = bfloat2float(vget_low_u16(_p23));
+            float32x4_t _p3 = bfloat2float(vget_high_u16(_p23));
             _p0 = op.func_pack4(_p0);
             _p1 = op.func_pack4(_p1);
             _p2 = op.func_pack4(_p2);
             _p3 = op.func_pack4(_p3);
-            _p01 = vcombine_u16(bfloat2float(_p0), bfloat2float(_p1));
-            _p23 = vcombine_u16(bfloat2float(_p2), bfloat2float(_p3));
+            _p01 = vcombine_u16(float2bfloat(_p0), float2bfloat(_p1));
+            _p23 = vcombine_u16(float2bfloat(_p2), float2bfloat(_p3));
             vst1q_u16(ptr, _p01);
             vst1q_u16(ptr + 8, _p23);
             ptr += 16;
@@ -475,19 +492,19 @@ static int unary_op_inplace_bf16s(Mat& a, const Option& opt)
         for (; i + 7 < size; i += 8)
         {
             uint16x8_t _p = vld1q_u16(ptr);
-            float32x4_t _p0 = float2bfloat(vget_low_u16(_p));
-            float32x4_t _p1 = float2bfloat(vget_high_u16(_p));
+            float32x4_t _p0 = bfloat2float(vget_low_u16(_p));
+            float32x4_t _p1 = bfloat2float(vget_high_u16(_p));
             _p0 = op.func_pack4(_p0);
             _p1 = op.func_pack4(_p1);
-            _p = vcombine_u16(bfloat2float(_p0), bfloat2float(_p1));
+            _p = vcombine_u16(float2bfloat(_p0), float2bfloat(_p1));
             vst1q_u16(ptr, _p);
             ptr += 8;
         }
         for (; i + 3 < size; i += 4)
         {
-            float32x4_t _p = float2bfloat(vld1_u16(ptr));
+            float32x4_t _p = bfloat2float(vld1_u16(ptr));
             _p = op.func_pack4(_p);
-            vst1_u16(ptr, bfloat2float(_p));
+            vst1_u16(ptr, float2bfloat(_p));
             ptr += 4;
         }
 #endif // __ARM_NEON
@@ -555,6 +572,9 @@ int UnaryOp_arm::forward_inplace_bf16s(Mat& bottom_top_blob, const Option& opt) 
 
     if (op_type == Operation_TANH)
         return unary_op_inplace_bf16s<unary_op_tanh>(bottom_top_blob, opt);
+
+    if (op_type == Operation_LOG10)
+        return unary_op_inplace_bf16s<unary_op_log10>(bottom_top_blob, opt);
 
     return 0;
 }

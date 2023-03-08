@@ -1,22 +1,26 @@
 ### Git clone ncnn repo with submodule
 
 ```
-$ git clone https://github.com/Tencent/ncnn.git
-$ cd ncnn
-$ git submodule update --init
+git clone https://github.com/Tencent/ncnn.git
+cd ncnn
+git submodule update --init
 ```
 
-* [Build for Linux / NVIDIA Jetson / Raspberry Pi](#build-for-linux)
-* [Build for Windows x64 using VS2017](#build-for-windows-x64-using-visual-studio-community-2017)
-* [Build for macOS](#build-for-macos)
-* [Build for ARM Cortex-A family with cross-compiling](#build-for-arm-cortex-a-family-with-cross-compiling)
-* [Build for Hisilicon platform with cross-compiling](#build-for-hisilicon-platform-with-cross-compiling)
-* [Build for Android](#build-for-android)
-* [Build for iOS on macOS with xcode](#build-for-ios-on-macos-with-xcode)
-* [Build for WebAssembly](#build-for-webassembly)
-* [Build for AllWinner D1](#build-for-allwinner-d1)
-* [Build for Loongson 2K1000](#build-for-loongson-2k1000)
-* [Build for Termux on Android](#Build-for-Termux-on-Android)
+- [Git clone ncnn repo with submodule](#git-clone-ncnn-repo-with-submodule)
+- [Build for Linux](#build-for-linux)
+  - [Nvidia Jetson](#nvidia-jetson)
+  - [Raspberry Pi](#raspberry-pi)
+  - [Verification](#verification)
+- [Build for Windows x64 using Visual Studio Community 2017](#build-for-windows-x64-using-visual-studio-community-2017)
+- [Build for macOS](#build-for-macos)
+- [Build for ARM Cortex-A family with cross-compiling](#build-for-arm-cortex-a-family-with-cross-compiling)
+- [Build for Hisilicon platform with cross-compiling](#build-for-hisilicon-platform-with-cross-compiling)
+- [Build for Android](#build-for-android)
+- [Build for iOS on macOS with xcode](#build-for-ios-on-macos-with-xcode)
+- [Build for WebAssembly](#build-for-webassembly)
+- [Build for AllWinner D1](#build-for-allwinner-d1)
+- [Build for Loongson 2K1000](#build-for-loongson-2k1000)
+- [Build for Termux on Android](#build-for-termux-on-android)
 
 ***
 
@@ -506,18 +510,18 @@ Install Emscripten
 ```shell
 git clone https://github.com/emscripten-core/emsdk.git
 cd emsdk
-./emsdk install 2.0.8
-./emsdk activate 2.0.8
+./emsdk install 3.1.28
+./emsdk activate 3.1.28
 
-source emsdk/emsdk_env.sh
+source emsdk_env.sh
 ```
 
 Build without any extension for general compatibility:
 ```shell
 mkdir -p build
 cd build
-cmake -DCMAKE_TOOLCHAIN_FILE=../emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake \
-    -DNCNN_THREADS=OFF -DNCNN_OPENMP=OFF -DNCNN_SIMPLEOMP=OFF -DNCNN_RUNTIME_CPU=OFF -DNCNN_SSE2=OFF -DNCNN_AVX2=OFF -DNCNN_AVX=OFF \
+cmake -DCMAKE_TOOLCHAIN_FILE=$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake \
+    -DNCNN_THREADS=OFF -DNCNN_OPENMP=OFF -DNCNN_SIMPLEOMP=OFF -DNCNN_SIMPLEOCV=ON -DNCNN_RUNTIME_CPU=OFF -DNCNN_SSE2=OFF -DNCNN_AVX2=OFF -DNCNN_AVX=OFF \
     -DNCNN_BUILD_TOOLS=OFF -DNCNN_BUILD_EXAMPLES=OFF -DNCNN_BUILD_BENCHMARK=OFF ..
 cmake --build . -j 4
 cmake --build . --target install
@@ -527,8 +531,8 @@ Build with WASM SIMD extension:
 ```shell
 mkdir -p build-simd
 cd build-simd
-cmake -DCMAKE_TOOLCHAIN_FILE=../emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake \
-    -DNCNN_THREADS=OFF -DNCNN_OPENMP=OFF -DNCNN_SIMPLEOMP=OFF -DNCNN_RUNTIME_CPU=OFF -DNCNN_SSE2=ON -DNCNN_AVX2=OFF -DNCNN_AVX=OFF \
+cmake -DCMAKE_TOOLCHAIN_FILE=$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake \
+    -DNCNN_THREADS=OFF -DNCNN_OPENMP=OFF -DNCNN_SIMPLEOMP=OFF -DNCNN_SIMPLEOCV=ON -DNCNN_RUNTIME_CPU=OFF -DNCNN_SSE2=ON -DNCNN_AVX2=OFF -DNCNN_AVX=OFF \
     -DNCNN_BUILD_TOOLS=OFF -DNCNN_BUILD_EXAMPLES=OFF -DNCNN_BUILD_BENCHMARK=OFF ..
 cmake --build . -j 4
 cmake --build . --target install
@@ -538,8 +542,8 @@ Build with WASM Thread extension:
 ```shell
 mkdir -p build-threads
 cd build-threads
-cmake -DCMAKE_TOOLCHAIN_FILE=../emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake \
-    -DNCNN_THREADS=ON -DNCNN_OPENMP=ON -DNCNN_SIMPLEOMP=ON -DNCNN_RUNTIME_CPU=OFF -DNCNN_SSE2=OFF -DNCNN_AVX2=OFF -DNCNN_AVX=OFF \
+cmake -DCMAKE_TOOLCHAIN_FILE=$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake \
+    -DNCNN_THREADS=ON -DNCNN_OPENMP=ON -DNCNN_SIMPLEOMP=ON -DNCNN_SIMPLEOCV=ON -DNCNN_RUNTIME_CPU=OFF -DNCNN_SSE2=OFF -DNCNN_AVX2=OFF -DNCNN_AVX=OFF \
     -DNCNN_BUILD_TOOLS=OFF -DNCNN_BUILD_EXAMPLES=OFF -DNCNN_BUILD_BENCHMARK=OFF ..
 cmake --build . -j 4
 cmake --build . --target install
@@ -549,8 +553,8 @@ Build with WASM SIMD and Thread extension:
 ```shell
 mkdir -p build-simd-threads
 cd build-simd-threads
-cmake -DCMAKE_TOOLCHAIN_FILE=../emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake \
-    -DNCNN_THREADS=ON -DNCNN_OPENMP=ON -DNCNN_SIMPLEOMP=ON -DNCNN_RUNTIME_CPU=OFF -DNCNN_SSE2=ON -DNCNN_AVX2=OFF -DNCNN_AVX=OFF \
+cmake -DCMAKE_TOOLCHAIN_FILE=$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake \
+    -DNCNN_THREADS=ON -DNCNN_OPENMP=ON -DNCNN_SIMPLEOMP=ON -DNCNN_SIMPLEOCV=ON -DNCNN_RUNTIME_CPU=OFF -DNCNN_SSE2=ON -DNCNN_AVX2=OFF -DNCNN_AVX=OFF \
     -DNCNN_BUILD_TOOLS=OFF -DNCNN_BUILD_EXAMPLES=OFF -DNCNN_BUILD_BENCHMARK=OFF ..
 cmake --build . -j 4
 cmake --build . --target install
