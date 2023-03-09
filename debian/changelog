@@ -1,3 +1,10 @@
+ncnn (1.0.20230223) unstable; urgency=medium
+
+  * Sync to Upstream
+  * Remove patch for cmake 3.13
+
+ -- WangZhengYang <wangzhengyang@uniontech.com>  Wed, 3 Mar 2023 9:15:34 +0800
+
 ncnn (1.0.20221128.1-deepin1) unstable; urgency=medium
 
   * Sync to Upstream
