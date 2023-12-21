@@ -1,0 +1,11 @@
+
+--- ncnn-1.0.20230223.orig/tools/darknet/darknet2ncnn.cpp
++++ ncnn-1.0.20230223/tools/darknet/darknet2ncnn.cpp
+@@ -25,6 +25,7 @@
+ #include <string>
+ #include <unordered_map>
+ #include <vector>
++#include <cstdint>
+ 
+ #define OUTPUT_LAYER_MAP 0 //enable this to generate darknet style layer output
+ 
