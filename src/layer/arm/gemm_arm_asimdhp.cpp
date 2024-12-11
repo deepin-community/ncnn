@@ -2281,12 +2281,16 @@ static void gemm_transB_packed_tile_fp16sa(const Mat& AT_tile, const Mat& BT_til
 static void get_optimal_tile_mnk_fp16sa(int M, int N, int K, int constant_TILE_M, int constant_TILE_N, int constant_TILE_K, int& TILE_M, int& TILE_N, int& TILE_K, int nT)
 {
     // resolve optimal tile size from cache size
-    size_t l2_cache_size = get_cpu_level2_cache_size();
-    int tile_size = (int)sqrt((float)l2_cache_size / 3 / sizeof(__fp16));
+    const size_t l2_cache_size = get_cpu_level2_cache_size();
 
-    TILE_M = tile_size / 8 * 8;
-    TILE_N = tile_size / 4 * 4;
-    TILE_K = tile_size / 8 * 8;
+    if (nT == 0)
+        nT = get_physical_big_cpu_count();
+
+    int tile_size = (int)sqrtf((float)l2_cache_size / 3 / sizeof(__fp16));
+
+    TILE_M = std::max(8, tile_size / 8 * 8);
+    TILE_N = std::max(4, tile_size / 4 * 4);
+    TILE_K = std::max(8, tile_size / 8 * 8);
 
     if (K > 0)
     {
@@ -2297,8 +2301,8 @@ static void get_optimal_tile_mnk_fp16sa(int M, int N, int K, int constant_TILE_M
         {
             tile_size = (int)((float)l2_cache_size / 2 / sizeof(__fp16) / TILE_K);
 
-            TILE_M = tile_size / 8 * 8;
-            TILE_N = tile_size / 4 * 4;
+            TILE_M = std::max(8, tile_size / 8 * 8);
+            TILE_N = std::max(4, tile_size / 4 * 4);
         }
     }
 
@@ -2355,8 +2359,12 @@ static int gemm_arm_fp16sa(const Mat& A, const Mat& B, const Mat& C, Mat& top_bl
     int nn_N = (N + TILE_N - 1) / TILE_N;
     int nn_K = (K + TILE_K - 1) / TILE_K;
 
-    Mat ATX(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, nT, 2u, opt.blob_allocator);
-    Mat BT(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 2u, opt.blob_allocator);
+    Mat ATX(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, nT, 2u, opt.workspace_allocator);
+    if (ATX.empty())
+        return -100;
+    Mat BT(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 2u, opt.workspace_allocator);
+    if (BT.empty())
+        return -100;
 
     const int nn_NK = nn_N * nn_K;
 
@@ -2387,12 +2395,20 @@ static int gemm_arm_fp16sa(const Mat& A, const Mat& B, const Mat& C, Mat& top_bl
 
     Mat topT;
     if (K > TILE_K || broadcast_type_C == 3 || output_transpose)
-        topT.create(TILE_N * TILE_M, 1, nT, 2u, opt.blob_allocator);
+    {
+        topT.create(TILE_N * TILE_M, 1, nT, 2u, opt.workspace_allocator);
+        if (topT.empty())
+            return -100;
+    }
 
     #pragma omp parallel for num_threads(nT)
     for (int ppi = 0; ppi < nn_M; ppi++)
     {
         const int i = ppi * TILE_M;
+
+        // shadowed variable for less openmp task args
+        const int M = transA ? A.w : (A.dims == 3 ? A.c : A.h) * A.elempack;
+        const int K = transA ? (A.dims == 3 ? A.c : A.h) * A.elempack : A.w;
 
         const int max_ii = std::min((M - i), TILE_M);
 
@@ -2463,7 +2479,9 @@ static int gemm_AT_arm_fp16sa(const Mat& AT, const Mat& B, const Mat& C, Mat& to
     int nn_N = (N + TILE_N - 1) / TILE_N;
     int nn_K = (K + TILE_K - 1) / TILE_K;
 
-    Mat BT(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 2u, opt.blob_allocator);
+    Mat BT(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 2u, opt.workspace_allocator);
+    if (BT.empty())
+        return -100;
 
     const int nn_NK = nn_N * nn_K;
 
@@ -2494,7 +2512,11 @@ static int gemm_AT_arm_fp16sa(const Mat& AT, const Mat& B, const Mat& C, Mat& to
 
     Mat topT;
     if (K > TILE_K || broadcast_type_C == 3 || output_transpose)
-        topT.create(TILE_N * TILE_M, 1, nT, 2u, opt.blob_allocator);
+    {
+        topT.create(TILE_N * TILE_M, 1, nT, 2u, opt.workspace_allocator);
+        if (topT.empty())
+            return -100;
+    }
 
     #pragma omp parallel for num_threads(nT)
     for (int ppi = 0; ppi < nn_M; ppi++)
@@ -2557,16 +2579,26 @@ static int gemm_BT_arm_fp16sa(const Mat& A, const Mat& BT, const Mat& C, Mat& to
     int nn_M = (M + TILE_M - 1) / TILE_M;
     // int nn_N = (N + TILE_N - 1) / TILE_N;
 
-    Mat ATX(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, nT, 2u, opt.blob_allocator);
+    Mat ATX(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, nT, 2u, opt.workspace_allocator);
+    if (ATX.empty())
+        return -100;
 
     Mat topT;
     if (K > TILE_K || broadcast_type_C == 3 || output_transpose)
-        topT.create(TILE_N * TILE_M, 1, nT, 2u, opt.blob_allocator);
+    {
+        topT.create(TILE_N * TILE_M, 1, nT, 2u, opt.workspace_allocator);
+        if (topT.empty())
+            return -100;
+    }
 
     #pragma omp parallel for num_threads(nT)
     for (int ppi = 0; ppi < nn_M; ppi++)
     {
         const int i = ppi * TILE_M;
+
+        // shadowed variable for less openmp task args
+        const int M = transA ? A.w : (A.dims == 3 ? A.c : A.h) * A.elempack;
+        const int K = transA ? (A.dims == 3 ? A.c : A.h) * A.elempack : A.w;
 
         const int max_ii = std::min((M - i), TILE_M);
 
@@ -2636,7 +2668,11 @@ static int gemm_AT_BT_arm_fp16sa(const Mat& AT, const Mat& BT, const Mat& C, Mat
 
     Mat topT;
     if (K > TILE_K || broadcast_type_C == 3 || output_transpose)
-        topT.create(TILE_N * TILE_M, 1, nT, 2u, opt.blob_allocator);
+    {
+        topT.create(TILE_N * TILE_M, 1, nT, 2u, opt.workspace_allocator);
+        if (topT.empty())
+            return -100;
+    }
 
     #pragma omp parallel for num_threads(nT)
     for (int ppi = 0; ppi < nn_M; ppi++)
@@ -2697,7 +2733,7 @@ int Gemm_arm::create_pipeline_fp16sa(const Option& opt)
 
         const int nn_M = (M + TILE_M - 1) / TILE_M;
 
-        AT_data.create(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, (M + TILE_M - 1) / TILE_M, 2u, opt.blob_allocator);
+        AT_data.create(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, (M + TILE_M - 1) / TILE_M, 2u, (Allocator*)0);
         if (AT_data.empty())
             return -100;
 
@@ -2725,9 +2761,7 @@ int Gemm_arm::create_pipeline_fp16sa(const Option& opt)
         }
 
         if (opt.lightmode)
-        {
             A_data.release();
-        }
     }
 
     if (constantB)
@@ -2740,7 +2774,7 @@ int Gemm_arm::create_pipeline_fp16sa(const Option& opt)
 
         const int nn_N = (N + TILE_N - 1) / TILE_N;
 
-        BT_data.create(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 2u, opt.blob_allocator);
+        BT_data.create(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 2u, (Allocator*)0);
         if (BT_data.empty())
             return -100;
 
@@ -2768,9 +2802,7 @@ int Gemm_arm::create_pipeline_fp16sa(const Option& opt)
         }
 
         if (opt.lightmode)
-        {
             B_data.release();
-        }
     }
 
     if (constantC && constant_broadcast_type_C != -1)
@@ -2797,9 +2829,7 @@ int Gemm_arm::create_pipeline_fp16sa(const Option& opt)
         }
 
         if (opt.lightmode)
-        {
             C_data.release();
-        }
     }
 
     if (constantA || constantB || constantC)
@@ -2904,13 +2934,15 @@ int Gemm_arm::forward_fp16sa(const std::vector<Mat>& bottom_blobs, std::vector<M
             {
                 Mat CT_data;
                 CT_data.create_like(C, opt.workspace_allocator);
+                if (CT_data.empty())
+                    return -100;
 
                 const int size = C.total() * C.elempack;
                 const __fp16* ptr = C;
                 __fp16* outptr = CT_data;
                 for (int i = 0; i < size; i++)
                 {
-                    outptr[i] = ptr[i] * beta;
+                    outptr[i] = ptr[i] * (__fp16)beta;
                 }
 
                 C = CT_data;

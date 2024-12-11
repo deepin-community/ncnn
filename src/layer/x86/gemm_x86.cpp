@@ -6699,25 +6699,29 @@ static void gemm_transB_packed_tile(const Mat& AT_tile, const Mat& BT_tile, cons
 static void get_optimal_tile_mnk(int M, int N, int K, int constant_TILE_M, int constant_TILE_N, int constant_TILE_K, int& TILE_M, int& TILE_N, int& TILE_K, int nT)
 {
     // resolve optimal tile size from cache size
-    size_t l2_cache_size = get_cpu_level2_cache_size();
+    const size_t l2_cache_size = get_cpu_level2_cache_size();
+
+    if (nT == 0)
+        nT = get_physical_big_cpu_count();
+
     int tile_size = (int)sqrt((float)l2_cache_size / 3 / sizeof(float));
 
 #if __AVX512F__
-    TILE_M = tile_size / 16 * 16;
-    TILE_N = tile_size / 4 * 4;
-    TILE_K = tile_size / 16 * 16;
+    TILE_M = std::max(16, tile_size / 16 * 16);
+    TILE_N = std::max(4, tile_size / 4 * 4);
+    TILE_K = std::max(16, tile_size / 16 * 16);
 #elif __AVX__
-    TILE_M = tile_size / 8 * 8;
-    TILE_N = tile_size / 4 * 4;
-    TILE_K = tile_size / 8 * 8;
+    TILE_M = std::max(8, tile_size / 8 * 8);
+    TILE_N = std::max(4, tile_size / 4 * 4);
+    TILE_K = std::max(8, tile_size / 8 * 8);
 #elif __SSE2__
-    TILE_M = tile_size / 4 * 4;
-    TILE_N = tile_size / 4 * 4;
-    TILE_K = tile_size / 4 * 4;
+    TILE_M = std::max(4, tile_size / 4 * 4);
+    TILE_N = std::max(4, tile_size / 4 * 4);
+    TILE_K = std::max(4, tile_size / 4 * 4);
 #else
-    TILE_M = tile_size / 2 * 2;
-    TILE_N = tile_size;
-    TILE_K = tile_size / 2 * 2;
+    TILE_M = std::max(2, tile_size / 2 * 2);
+    TILE_N = std::max(1, tile_size);
+    TILE_K = std::max(2, tile_size / 2 * 2);
 #endif
 
     if (K > 0)
@@ -6738,17 +6742,17 @@ static void get_optimal_tile_mnk(int M, int N, int K, int constant_TILE_M, int c
             tile_size = (int)((float)l2_cache_size / 2 / sizeof(float) / TILE_K);
 
 #if __AVX512F__
-            TILE_M = tile_size / 16 * 16;
-            TILE_N = tile_size / 4 * 4;
+            TILE_M = std::max(16, tile_size / 16 * 16);
+            TILE_N = std::max(4, tile_size / 4 * 4);
 #elif __AVX__
-            TILE_M = tile_size / 8 * 8;
-            TILE_N = tile_size / 4 * 4;
+            TILE_M = std::max(8, tile_size / 8 * 8);
+            TILE_N = std::max(4, tile_size / 4 * 4);
 #elif __SSE2__
-            TILE_M = tile_size / 4 * 4;
-            TILE_N = tile_size / 4 * 4;
+            TILE_M = std::max(4, tile_size / 4 * 4);
+            TILE_N = std::max(4, tile_size / 4 * 4);
 #else
-            TILE_M = tile_size / 2 * 2;
-            TILE_N = tile_size;
+            TILE_M = std::max(2, tile_size / 2 * 2);
+            TILE_N = std::max(1, tile_size);
 #endif
         }
     }
@@ -6854,8 +6858,12 @@ static int gemm_x86(const Mat& A, const Mat& B, const Mat& C, Mat& top_blob, int
     int nn_N = (N + TILE_N - 1) / TILE_N;
     int nn_K = (K + TILE_K - 1) / TILE_K;
 
-    Mat ATX(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, nT, 4u, opt.blob_allocator);
-    Mat BT(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 4u, opt.blob_allocator);
+    Mat ATX(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, nT, 4u, opt.workspace_allocator);
+    if (ATX.empty())
+        return -100;
+    Mat BT(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 4u, opt.workspace_allocator);
+    if (BT.empty())
+        return -100;
 
     const int nn_NK = nn_N * nn_K;
 
@@ -6886,12 +6894,20 @@ static int gemm_x86(const Mat& A, const Mat& B, const Mat& C, Mat& top_blob, int
 
     Mat topT;
     if (K > TILE_K || broadcast_type_C == 3 || output_transpose)
-        topT.create(TILE_N * TILE_M, 1, nT, 4u, opt.blob_allocator);
+    {
+        topT.create(TILE_N * TILE_M, 1, nT, 4u, opt.workspace_allocator);
+        if (topT.empty())
+            return -100;
+    }
 
     #pragma omp parallel for num_threads(nT)
     for (int ppi = 0; ppi < nn_M; ppi++)
     {
         const int i = ppi * TILE_M;
+
+        // shadowed variable for less openmp task args
+        const int M = transA ? A.w : (A.dims == 3 ? A.c : A.h) * A.elempack;
+        const int K = transA ? (A.dims == 3 ? A.c : A.h) * A.elempack : A.w;
 
         const int max_ii = std::min((M - i), TILE_M);
 
@@ -6962,7 +6978,9 @@ static int gemm_AT_x86(const Mat& AT, const Mat& B, const Mat& C, Mat& top_blob,
     int nn_N = (N + TILE_N - 1) / TILE_N;
     int nn_K = (K + TILE_K - 1) / TILE_K;
 
-    Mat BT(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 4u, opt.blob_allocator);
+    Mat BT(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 4u, opt.workspace_allocator);
+    if (BT.empty())
+        return -100;
 
     const int nn_NK = nn_N * nn_K;
 
@@ -6993,7 +7011,11 @@ static int gemm_AT_x86(const Mat& AT, const Mat& B, const Mat& C, Mat& top_blob,
 
     Mat topT;
     if (K > TILE_K || broadcast_type_C == 3 || output_transpose)
-        topT.create(TILE_N * TILE_M, 1, nT, 4u, opt.blob_allocator);
+    {
+        topT.create(TILE_N * TILE_M, 1, nT, 4u, opt.workspace_allocator);
+        if (topT.empty())
+            return -100;
+    }
 
     #pragma omp parallel for num_threads(nT)
     for (int ppi = 0; ppi < nn_M; ppi++)
@@ -7056,16 +7078,26 @@ static int gemm_BT_x86(const Mat& A, const Mat& BT, const Mat& C, Mat& top_blob,
     int nn_M = (M + TILE_M - 1) / TILE_M;
     // int nn_N = (N + TILE_N - 1) / TILE_N;
 
-    Mat ATX(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, nT, 4u, opt.blob_allocator);
+    Mat ATX(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, nT, 4u, opt.workspace_allocator);
+    if (ATX.empty())
+        return -100;
 
     Mat topT;
     if (K > TILE_K || broadcast_type_C == 3 || output_transpose)
-        topT.create(TILE_N * TILE_M, 1, nT, 4u, opt.blob_allocator);
+    {
+        topT.create(TILE_N * TILE_M, 1, nT, 4u, opt.workspace_allocator);
+        if (topT.empty())
+            return -100;
+    }
 
     #pragma omp parallel for num_threads(nT)
     for (int ppi = 0; ppi < nn_M; ppi++)
     {
         const int i = ppi * TILE_M;
+
+        // shadowed variable for less openmp task args
+        const int M = transA ? A.w : (A.dims == 3 ? A.c : A.h) * A.elempack;
+        const int K = transA ? (A.dims == 3 ? A.c : A.h) * A.elempack : A.w;
 
         const int max_ii = std::min((M - i), TILE_M);
 
@@ -7135,7 +7167,11 @@ static int gemm_AT_BT_x86(const Mat& AT, const Mat& BT, const Mat& C, Mat& top_b
 
     Mat topT;
     if (K > TILE_K || broadcast_type_C == 3 || output_transpose)
-        topT.create(TILE_N * TILE_M, 1, nT, 4u, opt.blob_allocator);
+    {
+        topT.create(TILE_N * TILE_M, 1, nT, 4u, opt.workspace_allocator);
+        if (topT.empty())
+            return -100;
+    }
 
     #pragma omp parallel for num_threads(nT)
     for (int ppi = 0; ppi < nn_M; ppi++)
@@ -7196,7 +7232,7 @@ int Gemm_x86::create_pipeline(const Option& opt)
 
         const int nn_M = (M + TILE_M - 1) / TILE_M;
 
-        AT_data.create(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, (M + TILE_M - 1) / TILE_M, 4u, opt.blob_allocator);
+        AT_data.create(TILE_K * TILE_M, (K + TILE_K - 1) / TILE_K, (M + TILE_M - 1) / TILE_M, 4u, (Allocator*)0);
         if (AT_data.empty())
             return -100;
 
@@ -7224,9 +7260,7 @@ int Gemm_x86::create_pipeline(const Option& opt)
         }
 
         if (opt.lightmode)
-        {
             A_data.release();
-        }
     }
 
     if (constantB)
@@ -7240,13 +7274,13 @@ int Gemm_x86::create_pipeline(const Option& opt)
         const int nn_N = (N + TILE_N - 1) / TILE_N;
         const int nn_K = (K + TILE_K - 1) / TILE_K;
 
-        BT_data.create(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 4u, opt.blob_allocator);
+        BT_data.create(TILE_K * TILE_N, (K + TILE_K - 1) / TILE_K, (N + TILE_N - 1) / TILE_N, 4u, (Allocator*)0);
         if (BT_data.empty())
             return -100;
 
         const int nn_NK = nn_N * nn_K;
 
-        #pragma omp parallel for num_threads(nT)
+        #pragma omp parallel for num_threads(opt.num_threads)
         for (int ppjk = 0; ppjk < nn_NK; ppjk++)
         {
             const int ppj = ppjk / nn_K;
@@ -7271,9 +7305,7 @@ int Gemm_x86::create_pipeline(const Option& opt)
         }
 
         if (opt.lightmode)
-        {
             B_data.release();
-        }
     }
 
     if (constantC && constant_broadcast_type_C != -1)
@@ -7310,9 +7342,7 @@ int Gemm_x86::create_pipeline(const Option& opt)
         }
 
         if (opt.lightmode)
-        {
             C_data.release();
-        }
     }
 
     if (constantA || constantB || constantC)
@@ -7494,6 +7524,8 @@ int Gemm_x86::forward(const std::vector<Mat>& bottom_blobs, std::vector<Mat>& to
         const Mat& B = bottom_blobs[1];
         ret = gemm_x86(A, B, C, top_blob, broadcast_type_C, transA, transB, output_transpose, constant_TILE_M, constant_TILE_N, constant_TILE_K, _nT, opt);
     }
+    if (ret != 0)
+        return ret;
 
     // multiply top_blob with alpha
     if (alpha != 1.f)
@@ -7507,7 +7539,7 @@ int Gemm_x86::forward(const std::vector<Mat>& bottom_blobs, std::vector<Mat>& to
         }
     }
 
-    return ret;
+    return 0;
 }
 
 } // namespace ncnn

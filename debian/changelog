@@ -1,3 +1,9 @@
+ncnn (1.0.20240820-0deepin2) unstable; urgency=medium
+
+  * Sync to Upstream.
+
+ -- lichenggang <lichenggang@deepin.org>  Wed, 11 Dec 2024 16:36:07 +0800
+
 ncnn (1.0.20230223-0deepin2) unstable; urgency=medium
 
   * Move to main.

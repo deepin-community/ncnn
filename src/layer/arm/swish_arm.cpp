@@ -14,8 +14,6 @@
 
 #include "swish_arm.h"
 
-#include <math.h>
-
 #if __ARM_NEON
 #include <arm_neon.h>
 #include "neon_mathfun.h"
@@ -112,7 +110,7 @@ int Swish_arm::forward_inplace(Mat& bottom_top_blob, const Option& opt) const
 #endif // __ARM_NEON
         for (; i < size; i++)
         {
-            *ptr = *ptr / (1.f + exp(-*ptr));
+            *ptr = *ptr / (1.f + expf(-*ptr));
 
             ptr++;
         }
@@ -181,7 +179,7 @@ int Swish_arm::forward_inplace_bf16s(Mat& bottom_top_blob, const Option& opt) co
         for (; i < size; i++)
         {
             float v = bfloat16_to_float32(*ptr);
-            v = v / (1.f + exp(-v));
+            v = v / (1.f + expf(-v));
             *ptr = float32_to_bfloat16(v);
 
             ptr++;

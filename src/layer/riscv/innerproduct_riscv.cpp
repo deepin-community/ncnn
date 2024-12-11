@@ -40,7 +40,7 @@ InnerProduct_riscv::InnerProduct_riscv()
 int InnerProduct_riscv::create_pipeline(const Option& opt)
 {
     {
-        flatten = ncnn::create_layer(ncnn::LayerType::Flatten);
+        flatten = ncnn::create_layer_cpu(ncnn::LayerType::Flatten);
 
         ncnn::ParamDict pd;
 
@@ -107,9 +107,7 @@ int InnerProduct_riscv::create_pipeline(const Option& opt)
     }
 
     if (opt.lightmode)
-    {
         weight_data.release();
-    }
 
     return 0;
 }
@@ -173,7 +171,7 @@ int InnerProduct_riscv::forward(const Mat& bottom_blob, Mat& top_blob, const Opt
 
     const int num_input = weight_data_size / num_output;
 
-    if (bottom_blob.dims == 2 && bottom_blob.w == num_input && bottom_blob.h * bottom_blob.elempack > 1)
+    if (bottom_blob.dims == 2 && bottom_blob.w == num_input)
     {
         // gemm
         int h = bottom_blob.h;
@@ -564,9 +562,7 @@ int InnerProduct_riscv::create_pipeline_fp16s(const Option& opt)
     ncnn::cast_float32_to_float16(bias_data, bias_data_fp16, opt);
 
     if (opt.lightmode)
-    {
         weight_data.release();
-    }
 
     return 0;
 }
@@ -577,7 +573,7 @@ int InnerProduct_riscv::forward_fp16s(const Mat& bottom_blob, Mat& top_blob, con
 
     const int num_input = weight_data_size / num_output;
 
-    if (bottom_blob.dims == 2 && bottom_blob.w == num_input && bottom_blob.h * bottom_blob.elempack > 1)
+    if (bottom_blob.dims == 2 && bottom_blob.w == num_input)
     {
         // gemm
         int h = bottom_blob.h;
@@ -839,7 +835,7 @@ int InnerProduct_riscv::forward_fp16sa(const Mat& bottom_blob, Mat& top_blob, co
 
     const int num_input = weight_data_size / num_output;
 
-    if (bottom_blob.dims == 2 && bottom_blob.w == num_input && bottom_blob.h * bottom_blob.elempack > 1)
+    if (bottom_blob.dims == 2 && bottom_blob.w == num_input)
     {
         // gemm
         int h = bottom_blob.h;

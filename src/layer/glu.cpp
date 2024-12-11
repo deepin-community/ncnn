@@ -14,8 +14,6 @@
 
 #include "glu.h"
 
-#include <math.h>
-
 namespace ncnn {
 
 GLU::GLU()
@@ -49,7 +47,7 @@ int GLU::forward(const Mat& bottom_blob, Mat& top_blob,
         #pragma omp parallel for num_threads(opt.num_threads)
         for (int x = 0; x < out_w; ++x)
         {
-            float sigmoid = static_cast<float>(1.f / (1.f + expf(-in_ptr[x + out_w])));
+            float sigmoid = 1.f / (1.f + expf(-in_ptr[x + out_w]));
 
             out_ptr[x] = in_ptr[x] * sigmoid;
         }
@@ -77,7 +75,7 @@ int GLU::forward(const Mat& bottom_blob, Mat& top_blob,
 
             for (int x = 0; x < w; ++x) {
                 float sigmoid =
-                    static_cast<float>(1.f / (1.f + exp(-in_ptr[x + offset])));
+                    1.f / (1.f + expf(-in_ptr[x + offset]));
 
                 out_ptr[x] = in_ptr[x] * sigmoid;
             }
@@ -90,7 +88,7 @@ int GLU::forward(const Mat& bottom_blob, Mat& top_blob,
         #pragma omp parallel for num_threads(opt.num_threads)
         for (int i = 0; i < size; ++i)
         {
-            float sigmoid = static_cast<float>(1.f / (1.f + exp(-in_ptr[i + offset])));
+            float sigmoid = 1.f / (1.f + expf(-in_ptr[i + offset]));
             out_ptr[i] = in_ptr[i] * sigmoid;
         }
 #endif
@@ -115,7 +113,7 @@ int GLU::forward(const Mat& bottom_blob, Mat& top_blob,
 
             for (int x = 0; x < out_w; ++x)
             {
-                float sigmoid = static_cast<float>(1.f / (1.f + exp(-in_ptr[x + out_w])));
+                float sigmoid = 1.f / (1.f + expf(-in_ptr[x + out_w]));
                 out_ptr[x] = in_ptr[x] * sigmoid;
             }
         }
@@ -146,7 +144,7 @@ int GLU::forward(const Mat& bottom_blob, Mat& top_blob,
 
             for (int i = 0; i < size; ++i)
             {
-                float sigmoid = static_cast<float>(1.f / (1.f + exp(-in_ptr[i + offset])));
+                float sigmoid = 1.f / (1.f + expf(-in_ptr[i + offset]));
                 out_ptr[i] = in_ptr[i] * sigmoid;
             }
         }
@@ -176,7 +174,7 @@ int GLU::forward(const Mat& bottom_blob, Mat& top_blob,
 
             for (int i = 0; i < size; ++i)
             {
-                float sigmoid = static_cast<float>(1.f / (1.f + exp(-in_ptr[i + offset])));
+                float sigmoid = 1.f / (1.f + expf(-in_ptr[i + offset]));
                 out_ptr[i] = in_ptr[i] * sigmoid;
             }
         }
@@ -204,7 +202,7 @@ int GLU::forward(const Mat& bottom_blob, Mat& top_blob,
             {
                 for (int x = 0; x < out_w; ++x)
                 {
-                    float sigmoid = static_cast<float>(1.f / (1.f + exp(-in_ptr[x + out_w])));
+                    float sigmoid = 1.f / (1.f + expf(-in_ptr[x + out_w]));
                     out_ptr[x] = in_ptr[x] * sigmoid;
                 }
                 in_ptr += w;

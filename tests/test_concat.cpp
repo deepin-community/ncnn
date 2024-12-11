@@ -12,7 +12,6 @@
 // CONDITIONS OF ANY KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations under the License.
 
-#include "layer/concat.h"
 #include "testutil.h"
 
 static int test_concat(const std::vector<ncnn::Mat>& a, int axis)
@@ -22,7 +21,7 @@ static int test_concat(const std::vector<ncnn::Mat>& a, int axis)
 
     std::vector<ncnn::Mat> weights(0);
 
-    int ret = test_layer<ncnn::Concat>("Concat", pd, weights, a);
+    int ret = test_layer("Concat", pd, weights, a);
     if (ret != 0)
     {
         fprintf(stderr, "test_concat failed a[0].dims=%d a[0]=(%d %d %d %d) axis=%d\n", a[0].dims, a[0].w, a[0].h, a[0].d, a[0].c, axis);
@@ -48,10 +47,11 @@ static int test_concat_0()
         {
             for (int k = 0; k < n; k++)
             {
-                std::vector<ncnn::Mat> as(3);
+                std::vector<ncnn::Mat> as(4);
                 as[0] = a[i];
                 as[1] = a[j];
                 as[2] = a[k];
+                as[3] = a[k];
 
                 int ret = test_concat(as, 0) || test_concat(as, -4);
                 if (ret != 0)
@@ -158,10 +158,11 @@ static int test_concat_4()
         {
             for (int k = 0; k < n; k++)
             {
-                std::vector<ncnn::Mat> as(3);
+                std::vector<ncnn::Mat> as(4);
                 as[0] = a[i];
                 as[1] = a[j];
                 as[2] = a[k];
+                as[3] = a[k];
 
                 int ret = test_concat(as, 0) || test_concat(as, -3);
                 if (ret != 0)
@@ -242,10 +243,11 @@ static int test_concat_7()
         {
             for (int k = 0; k < n; k++)
             {
-                std::vector<ncnn::Mat> as(3);
+                std::vector<ncnn::Mat> as(4);
                 as[0] = a[i];
                 as[1] = a[j];
                 as[2] = a[k];
+                as[3] = a[k];
 
                 int ret = test_concat(as, 0) || test_concat(as, -2);
                 if (ret != 0)
@@ -300,10 +302,11 @@ static int test_concat_9()
         {
             for (int k = 0; k < n; k++)
             {
-                std::vector<ncnn::Mat> as(3);
+                std::vector<ncnn::Mat> as(4);
                 as[0] = a[i];
                 as[1] = a[j];
                 as[2] = a[k];
+                as[3] = a[k];
 
                 int ret = test_concat(as, 0) || test_concat(as, -1);
                 if (ret != 0)
