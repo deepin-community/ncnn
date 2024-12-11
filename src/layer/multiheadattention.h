@@ -32,10 +32,12 @@ public:
 
 public:
     int embed_dim;
-    int num_head;
+    int num_heads;
     int weight_data_size;
     int kdim;
     int vdim;
+    int attn_mask;
+    float scale;
 
     Mat q_weight_data;
     Mat q_bias_data;

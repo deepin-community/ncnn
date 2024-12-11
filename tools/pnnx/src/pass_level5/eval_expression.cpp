@@ -14,6 +14,8 @@
 
 #include "eval_expression.h"
 
+#include <fenv.h>
+#include <float.h>
 #include <math.h>
 
 #include <iostream>
@@ -39,8 +41,20 @@ static bool token_is_argument(const std::string& t)
     return true;
 }
 
+static bool token_is_complex(const std::string& t)
+{
+    // 2.000000e+00+3.000000e+00j
+    if (t[t.size() - 1] != 'j')
+        return false;
+
+    return true;
+}
+
 static bool token_is_literal(const std::string& t)
 {
+    if (token_is_complex(t))
+        return true;
+
     std::istringstream iss(t);
     float f;
     iss >> std::noskipws >> f;
@@ -105,38 +119,49 @@ static std::string eval_expression(const Operator* op)
         {
             std::string a = exprstack.top();
             exprstack.pop();
-            std::string b = exprstack.top();
-            exprstack.pop();
 
-            if (token_is_argument(a) && token_is_literal(b))
+            if (exprstack.empty())
             {
-                int input_index = std::stoi(a.substr(1));
-                if (op->inputs[input_index]->shape.empty())
+                std::string r = std::string("size(") + a + ")";
+                exprstack.push(r);
+            }
+            else
+            {
+                std::string b = exprstack.top();
+                exprstack.pop();
+
+                if (token_is_argument(a) && token_is_literal(b))
                 {
-                    std::string r = std::string("size(") + a + "," + b + ")";
-                    exprstack.push(r);
-                }
-                else
-                {
-                    int bi = std::stoi(b);
-                    int r = op->inputs[input_index]->shape[bi];
-                    if (r == -1)
+                    int input_index = std::stoi(a.substr(1));
+                    if (op->inputs[input_index]->shape.empty())
                     {
-                        // do not evaluate dynamic size info as -1
-                        // just keep the size expression
                         std::string r = std::string("size(") + a + "," + b + ")";
                         exprstack.push(r);
                     }
                     else
                     {
-                        exprstack.push(std::to_string(r));
+                        int bi = std::stoi(b);
+                        if (bi < 0)
+                            bi = op->inputs[input_index]->shape.size() + bi;
+                        int r = op->inputs[input_index]->shape[bi];
+                        if (r == -1)
+                        {
+                            // do not evaluate dynamic size info as -1
+                            // just keep the size expression
+                            std::string r = std::string("size(") + a + "," + b + ")";
+                            exprstack.push(r);
+                        }
+                        else
+                        {
+                            exprstack.push(std::to_string(r));
+                        }
                     }
                 }
-            }
-            else
-            {
-                std::string r = std::string("size(") + a + "," + b + ")";
-                exprstack.push(r);
+                else
+                {
+                    std::string r = std::string("size(") + a + "," + b + ")";
+                    exprstack.push(r);
+                }
             }
         }
         else if (t == "int"
@@ -156,6 +181,7 @@ static std::string eval_expression(const Operator* op)
                  || t == "log10"
                  || t == "neg"
                  || t == "reciprocal"
+                 || t == "round"
                  || t == "rsqrt"
                  || t == "sign"
                  || t == "sin"
@@ -164,7 +190,10 @@ static std::string eval_expression(const Operator* op)
                  || t == "square"
                  || t == "tan"
                  || t == "tanh"
-                 || t == "trunc")
+                 || t == "trunc"
+                 || t == "torch.bool"
+                 || t == "torch.float"
+                 || t == "torch.long")
         {
             std::string a = exprstack.top();
             exprstack.pop();
@@ -176,6 +205,11 @@ static std::string eval_expression(const Operator* op)
                 if (t == "int")
                 {
                     int r = int(af);
+                    if (token_is_interger_literal(a))
+                    {
+                        r = std::stoi(a);
+                    }
+
                     exprstack.push(std::to_string(r));
                 }
                 if (t == "abs")
@@ -258,6 +292,15 @@ static std::string eval_expression(const Operator* op)
                     float r = 1.f / af;
                     exprstack.push(std::to_string(r));
                 }
+                if (t == "round")
+                {
+                    // round to nearest even
+                    int old_rm = fegetround();
+                    fesetround(FE_TONEAREST);
+                    float r = nearbyintf(af);
+                    fesetround(old_rm);
+                    exprstack.push(std::to_string(r));
+                }
                 if (t == "rsqrt")
                 {
                     float r = 1.f / sqrt(af);
@@ -303,6 +346,31 @@ static std::string eval_expression(const Operator* op)
                     float r = trunc(af);
                     exprstack.push(std::to_string(r));
                 }
+                if (t == "torch.bool")
+                {
+                    int r = int(af);
+                    if (token_is_interger_literal(a))
+                    {
+                        r = std::stoi(a);
+                    }
+
+                    exprstack.push(r == 0 ? "False" : "True");
+                }
+                if (t == "torch.float")
+                {
+                    float r = af;
+                    exprstack.push(std::to_string(r));
+                }
+                if (t == "torch.long")
+                {
+                    long r = long(af);
+                    if (token_is_interger_literal(a))
+                    {
+                        r = std::stol(a);
+                    }
+
+                    exprstack.push(std::to_string(r));
+                }
             }
             else
             {
@@ -313,11 +381,17 @@ static std::string eval_expression(const Operator* op)
         else if (t == "atan2"
                  || t == "add"
                  || t == "sub"
+                 || t == "max"
+                 || t == "maximum"
+                 || t == "min"
+                 || t == "minimum"
                  || t == "mul"
                  || t == "div"
                  || t == "floor_divide"
+                 || t == "fmod"
                  || t == "pow"
-                 || t == "remainder")
+                 || t == "remainder"
+                 || t == "logaddexp")
         {
             std::string a = exprstack.top();
             exprstack.pop();
@@ -344,6 +418,16 @@ static std::string eval_expression(const Operator* op)
                     float r = af - bf;
                     exprstack.push(std::to_string(r));
                 }
+                if (t == "max" || t == "maximum")
+                {
+                    float r = std::max(af, bf);
+                    exprstack.push(std::to_string(r));
+                }
+                if (t == "minimum")
+                {
+                    float r = std::min(af, bf);
+                    exprstack.push(std::to_string(r));
+                }
                 if (t == "mul")
                 {
                     float r = af * bf;
@@ -352,6 +436,11 @@ static std::string eval_expression(const Operator* op)
                 if (t == "div")
                 {
                     float r = af / bf;
+                    exprstack.push(std::to_string(r));
+                }
+                if (t == "fmod")
+                {
+                    float r = fmod(af, bf);
                     exprstack.push(std::to_string(r));
                 }
                 if (t == "floor_divide")
@@ -369,6 +458,11 @@ static std::string eval_expression(const Operator* op)
                     float r = fmod(af, bf);
                     if (af * bf < 0)
                         r += bf;
+                    exprstack.push(std::to_string(r));
+                }
+                if (t == "logaddexp")
+                {
+                    float r = log(exp(af) + exp(bf));
                     exprstack.push(std::to_string(r));
                 }
             }

@@ -17,6 +17,10 @@
 #include "platform.h"
 
 #include <limits.h>
+#ifndef __wasi__
+#include <setjmp.h>
+#include <signal.h>
+#endif // __wasi__
 #include <stdio.h>
 #include <string.h>
 
@@ -42,10 +46,9 @@
 #include <emscripten/threading.h>
 #endif
 
-#if defined _WIN32 && !(defined __MINGW32__)
+#if defined _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <powerbase.h>
 #endif
 
 #if defined __ANDROID__ || defined __linux__
@@ -53,9 +56,13 @@
 #if __ANDROID_API__ >= 18
 #include <sys/auxv.h> // getauxval()
 #endif
+#include <sys/system_properties.h> // __system_property_get()
 #include <dlfcn.h>
 #endif
+#include <ctype.h>
 #include <stdint.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #endif
@@ -66,6 +73,7 @@
 #include <mach/thread_act.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
+#include <unistd.h>
 #include "TargetConditionals.h"
 #if TARGET_OS_IPHONE
 #define __IOS__ 1
@@ -86,11 +94,11 @@
 #ifndef CPUFAMILY_ARM_LIGHTNING_THUNDER
 #define CPUFAMILY_ARM_LIGHTNING_THUNDER 0x462504d2
 #endif
-// A14
+// A14 / M1
 #ifndef CPUFAMILY_ARM_FIRESTORM_ICESTORM
 #define CPUFAMILY_ARM_FIRESTORM_ICESTORM 0x1b588bb3
 #endif
-// A15
+// A15 / M2
 #ifndef CPUFAMILY_ARM_AVALANCHE_BLIZZARD
 #define CPUFAMILY_ARM_AVALANCHE_BLIZZARD 0xda33d83d
 #endif
@@ -98,13 +106,21 @@
 #ifndef CPUFAMILY_ARM_EVEREST_SAWTOOTH
 #define CPUFAMILY_ARM_EVEREST_SAWTOOTH 0x8765edea
 #endif
-// M1
-#ifndef CPUFAMILY_AARCH64_FIRESTORM_ICESTORM
-#define CPUFAMILY_AARCH64_FIRESTORM_ICESTORM 0x1b588bb3
+// A17
+#ifndef CPUFAMILY_ARM_COLL
+#define CPUFAMILY_ARM_COLL 0x2876f5b5
 #endif
-// M2
-#ifndef CPUFAMILY_AARCH64_AVALANCHE_BLIZZARD
-#define CPUFAMILY_AARCH64_AVALANCHE_BLIZZARD 0xda33d83d
+// M3
+#ifndef CPUFAMILY_ARM_IBIZA
+#define CPUFAMILY_ARM_IBIZA 0xfa33415e
+#endif
+// M3 Pro
+#ifndef CPUFAMILY_ARM_LOBOS
+#define CPUFAMILY_ARM_LOBOS 0x5f4dea93
+#endif
+// M3 Max
+#ifndef CPUFAMILY_ARM_PALMA
+#define CPUFAMILY_ARM_PALMA 0x72015832
 #endif
 #endif // __APPLE__
 
@@ -112,12 +128,174 @@
 #include <immintrin.h>
 #endif
 
-namespace ncnn {
+#if (defined _WIN32 && (__aarch64__ || __arm__))
+#define RUAPU_IMPLEMENTATION
+#include "ruapu.h"
+#endif
+
+// topology info
+static int g_cpucount;
+static int g_physical_cpucount;
+static int g_powersave;
+static ncnn::CpuSet g_cpu_affinity_mask_all;
+static ncnn::CpuSet g_cpu_affinity_mask_little;
+static ncnn::CpuSet g_cpu_affinity_mask_big;
+
+// isa info
+#if defined _WIN32
+#if __aarch64__
+static int g_cpu_support_arm_asimdhp;
+static int g_cpu_support_arm_cpuid;
+static int g_cpu_support_arm_asimddp;
+static int g_cpu_support_arm_asimdfhm;
+static int g_cpu_support_arm_bf16;
+static int g_cpu_support_arm_i8mm;
+static int g_cpu_support_arm_sve;
+static int g_cpu_support_arm_sve2;
+static int g_cpu_support_arm_svebf16;
+static int g_cpu_support_arm_svei8mm;
+static int g_cpu_support_arm_svef32mm;
+#elif __arm__
+static int g_cpu_support_arm_edsp;
+static int g_cpu_support_arm_neon;
+static int g_cpu_support_arm_vfpv4;
+#endif // __aarch64__ || __arm__
+#elif defined __ANDROID__ || defined __linux__
+static unsigned int g_hwcaps;
+static unsigned int g_hwcaps2;
+#elif __APPLE__
+static unsigned int g_hw_cpufamily;
+static cpu_type_t g_hw_cputype;
+static cpu_subtype_t g_hw_cpusubtype;
+#if __aarch64__
+static int g_hw_optional_arm_FEAT_FP16;
+static int g_hw_optional_arm_FEAT_DotProd;
+static int g_hw_optional_arm_FEAT_FHM;
+static int g_hw_optional_arm_FEAT_BF16;
+static int g_hw_optional_arm_FEAT_I8MM;
+#endif // __aarch64__
+#endif
+
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+static int g_cpu_support_x86_avx;
+static int g_cpu_support_x86_fma;
+static int g_cpu_support_x86_xop;
+static int g_cpu_support_x86_f16c;
+static int g_cpu_support_x86_avx2;
+static int g_cpu_support_x86_avx_vnni;
+static int g_cpu_support_x86_avx512;
+static int g_cpu_support_x86_avx512_vnni;
+static int g_cpu_support_x86_avx512_bf16;
+static int g_cpu_support_x86_avx512_fp16;
+#endif // defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+
+static int g_cpu_level2_cachesize;
+static int g_cpu_level3_cachesize;
+
+// misc info
+#if defined __ANDROID__ || defined __linux__
+#if __aarch64__
+static int g_cpu_is_arm_a53_a55;
+#endif // __aarch64__
+#endif // defined __ANDROID__ || defined __linux__
+
+static bool is_being_debugged()
+{
+#if defined _WIN32
+    return IsDebuggerPresent();
+#elif defined __ANDROID__ || defined __linux__
+    // https://stackoverflow.com/questions/3596781/how-to-detect-if-the-current-process-is-being-run-by-gdb
+    int status_fd = open("/proc/self/status", O_RDONLY);
+    if (status_fd == -1)
+        return false;
+
+    char buf[4096];
+    ssize_t num_read = read(status_fd, buf, sizeof(buf) - 1);
+    close(status_fd);
+
+    if (num_read <= 0)
+        return false;
+
+    buf[num_read] = '\0';
+    const char tracerPidString[] = "TracerPid:";
+    const char* tracer_pid_ptr = strstr(buf, tracerPidString);
+    if (!tracer_pid_ptr)
+        return false;
+
+    for (const char* ch = tracer_pid_ptr + sizeof(tracerPidString) - 1; ch <= buf + num_read; ++ch)
+    {
+        if (isspace(*ch))
+            continue;
+
+        return isdigit(*ch) != 0 && *ch != '0';
+    }
+
+    return false;
+#elif defined __APPLE__
+    // https://stackoverflow.com/questions/2200277/detecting-debugger-on-mac-os-x
+    struct kinfo_proc info;
+    info.kp_proc.p_flag = 0;
+
+    int mib[4];
+    mib[0] = CTL_KERN;
+    mib[1] = KERN_PROC;
+    mib[2] = KERN_PROC_PID;
+    mib[3] = getpid();
+
+    size_t size = sizeof(info);
+    sysctl(mib, sizeof(mib) / sizeof(*mib), &info, &size, NULL, 0);
+
+    return ((info.kp_proc.p_flag & P_TRACED) != 0);
+#else
+    // unknown platform :(
+    fprintf(stderr, "unknown platform!\n");
+    return false;
+#endif
+}
 
 #if defined __ANDROID__ || defined __linux__
 
 #define AT_HWCAP  16
 #define AT_HWCAP2 26
+
+#if __aarch64__
+// from arch/arm64/include/uapi/asm/hwcap.h
+#define HWCAP_ASIMD     (1 << 1)
+#define HWCAP_ASIMDHP   (1 << 10)
+#define HWCAP_CPUID     (1 << 11)
+#define HWCAP_ASIMDDP   (1 << 20)
+#define HWCAP_SVE       (1 << 22)
+#define HWCAP_ASIMDFHM  (1 << 23)
+#define HWCAP2_SVE2     (1 << 1)
+#define HWCAP2_SVEI8MM  (1 << 9)
+#define HWCAP2_SVEF32MM (1 << 10)
+#define HWCAP2_SVEBF16  (1 << 12)
+#define HWCAP2_I8MM     (1 << 13)
+#define HWCAP2_BF16     (1 << 14)
+#else
+// from arch/arm/include/uapi/asm/hwcap.h
+#define HWCAP_EDSP  (1 << 7)
+#define HWCAP_NEON  (1 << 12)
+#define HWCAP_VFPv4 (1 << 16)
+#endif
+
+#if __mips__
+// from arch/mips/include/uapi/asm/hwcap.h
+#define HWCAP_MIPS_MSA     (1 << 1)
+#define HWCAP_LOONGSON_MMI (1 << 11)
+#endif
+
+#if __loongarch64
+// from arch/loongarch/include/uapi/asm/hwcap.h
+#define HWCAP_LOONGARCH_LSX  (1 << 4)
+#define HWCAP_LOONGARCH_LASX (1 << 5)
+#endif
+
+#if __riscv
+// from arch/riscv/include/uapi/asm/hwcap.h
+#define COMPAT_HWCAP_ISA_F (1 << ('F' - 'A'))
+#define COMPAT_HWCAP_ISA_V (1 << ('V' - 'A'))
+#endif
 
 #if defined __ANDROID__
 // Probe the system's C library for a 'getauxval' function and call it if
@@ -212,56 +390,36 @@ static unsigned int get_elf_hwcap_from_proc_self_auxv(unsigned int type)
 
 static unsigned int get_elf_hwcap(unsigned int type)
 {
+    unsigned int hwcap = 0;
+
 #if defined __ANDROID__
-    unsigned int hwcap = get_elf_hwcap_from_getauxval(type);
-    if (hwcap)
-        return hwcap;
+    hwcap = get_elf_hwcap_from_getauxval(type);
 #endif
 
-    return get_elf_hwcap_from_proc_self_auxv(type);
-}
+    if (!hwcap)
+        hwcap = get_elf_hwcap_from_proc_self_auxv(type);
 
-static unsigned int g_hwcaps = get_elf_hwcap(AT_HWCAP);
-static unsigned int g_hwcaps2 = get_elf_hwcap(AT_HWCAP2);
-
+#if defined __ANDROID__
 #if __aarch64__
-// from arch/arm64/include/uapi/asm/hwcap.h
-#define HWCAP_ASIMD     (1 << 1)
-#define HWCAP_ASIMDHP   (1 << 10)
-#define HWCAP_ASIMDDP   (1 << 20)
-#define HWCAP_SVE       (1 << 22)
-#define HWCAP_ASIMDFHM  (1 << 23)
-#define HWCAP2_SVE2     (1 << 1)
-#define HWCAP2_SVEI8MM  (1 << 9)
-#define HWCAP2_SVEF32MM (1 << 10)
-#define HWCAP2_SVEBF16  (1 << 12)
-#define HWCAP2_I8MM     (1 << 13)
-#define HWCAP2_BF16     (1 << 14)
-#else
-// from arch/arm/include/uapi/asm/hwcap.h
-#define HWCAP_EDSP  (1 << 7)
-#define HWCAP_NEON  (1 << 12)
-#define HWCAP_VFPv4 (1 << 16)
-#endif
+    if (type == AT_HWCAP)
+    {
+        // samsung exynos9810 on android pre-9 incorrectly reports armv8.2
+        // for little cores, but big cores only support armv8.0
+        // drop all armv8.2 features used by ncnn for preventing SIGILLs
+        // ref https://reviews.llvm.org/D114523
+        char arch[PROP_VALUE_MAX];
+        int len = __system_property_get("ro.arch", arch);
+        if (len > 0 && strncmp(arch, "exynos9810", 10) == 0)
+        {
+            hwcap &= ~HWCAP_ASIMDHP;
+            hwcap &= ~HWCAP_ASIMDDP;
+        }
+    }
+#endif // __aarch64__
+#endif // defined __ANDROID__
 
-#if __mips__
-// from arch/mips/include/uapi/asm/hwcap.h
-#define HWCAP_MIPS_MSA     (1 << 1)
-#define HWCAP_LOONGSON_MMI (1 << 11)
-#endif
-
-#if __loongarch64
-// from arch/loongarch/include/uapi/asm/hwcap.h
-#define HWCAP_LOONGARCH_LSX  (1 << 4)
-#define HWCAP_LOONGARCH_LASX (1 << 5)
-#endif
-
-#if __riscv
-// from arch/riscv/include/uapi/asm/hwcap.h
-#define COMPAT_HWCAP_ISA_F (1 << ('F' - 'A'))
-#define COMPAT_HWCAP_ISA_V (1 << ('V' - 'A'))
-#endif
-
+    return hwcap;
+}
 #endif // defined __ANDROID__ || defined __linux__
 
 #if __APPLE__
@@ -289,10 +447,6 @@ static cpu_subtype_t get_hw_cpusubtype()
     return value;
 }
 
-static unsigned int g_hw_cpufamily = get_hw_cpufamily();
-static cpu_type_t g_hw_cputype = get_hw_cputype();
-static cpu_subtype_t g_hw_cpusubtype = get_hw_cpusubtype();
-
 static int get_hw_capability(const char* cap)
 {
     int64_t value = 0;
@@ -300,423 +454,12 @@ static int get_hw_capability(const char* cap)
     sysctlbyname(cap, &value, &len, NULL, 0);
     return value;
 }
-
-static int g_hw_optional_arm_FEAT_FP16 = get_hw_capability("hw.optional.arm.FEAT_FP16");
-static int g_hw_optional_arm_FEAT_DotProd = get_hw_capability("hw.optional.arm.FEAT_DotProd");
-static int g_hw_optional_arm_FEAT_FHM = get_hw_capability("hw.optional.arm.FEAT_FHM");
-static int g_hw_optional_arm_FEAT_BF16 = get_hw_capability("hw.optional.arm.FEAT_BF16");
-static int g_hw_optional_arm_FEAT_I8MM = get_hw_capability("hw.optional.arm.FEAT_I8MM");
 #endif // __APPLE__
-
-#if (defined _WIN32 && !(defined __MINGW32__))
-CpuSet::CpuSet()
-{
-    disable_all();
-}
-
-void CpuSet::enable(int cpu)
-{
-    mask |= (1 << cpu);
-}
-
-void CpuSet::disable(int cpu)
-{
-    mask &= ~(1 << cpu);
-}
-
-void CpuSet::disable_all()
-{
-    mask = 0;
-}
-
-bool CpuSet::is_enabled(int cpu) const
-{
-    return mask & (1 << cpu);
-}
-
-int CpuSet::num_enabled() const
-{
-    int num_enabled = 0;
-    for (int i = 0; i < (int)sizeof(mask) * 8; i++)
-    {
-        if (is_enabled(i))
-            num_enabled++;
-    }
-
-    return num_enabled;
-}
-#elif defined __ANDROID__ || defined __linux__
-CpuSet::CpuSet()
-{
-    disable_all();
-}
-
-void CpuSet::enable(int cpu)
-{
-    CPU_SET(cpu, &cpu_set);
-}
-
-void CpuSet::disable(int cpu)
-{
-    CPU_CLR(cpu, &cpu_set);
-}
-
-void CpuSet::disable_all()
-{
-    CPU_ZERO(&cpu_set);
-}
-
-bool CpuSet::is_enabled(int cpu) const
-{
-    return CPU_ISSET(cpu, &cpu_set);
-}
-
-int CpuSet::num_enabled() const
-{
-    int num_enabled = 0;
-    for (int i = 0; i < (int)sizeof(cpu_set_t) * 8; i++)
-    {
-        if (is_enabled(i))
-            num_enabled++;
-    }
-
-    return num_enabled;
-}
-#elif __APPLE__
-CpuSet::CpuSet()
-{
-    disable_all();
-}
-
-void CpuSet::enable(int cpu)
-{
-    policy |= (1 << cpu);
-}
-
-void CpuSet::disable(int cpu)
-{
-    policy &= ~(1 << cpu);
-}
-
-void CpuSet::disable_all()
-{
-    policy = 0;
-}
-
-bool CpuSet::is_enabled(int cpu) const
-{
-    return policy & (1 << cpu);
-}
-
-int CpuSet::num_enabled() const
-{
-    int num_enabled = 0;
-    for (int i = 0; i < (int)sizeof(policy) * 8; i++)
-    {
-        if (is_enabled(i))
-            num_enabled++;
-    }
-
-    return num_enabled;
-}
-#else
-CpuSet::CpuSet()
-{
-}
-
-void CpuSet::enable(int /* cpu */)
-{
-}
-
-void CpuSet::disable(int /* cpu */)
-{
-}
-
-void CpuSet::disable_all()
-{
-}
-
-bool CpuSet::is_enabled(int /* cpu */) const
-{
-    return true;
-}
-
-int CpuSet::num_enabled() const
-{
-    return get_cpu_count();
-}
-#endif
-
-int cpu_support_arm_edsp()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return 0;
-#else
-    return g_hwcaps & HWCAP_EDSP;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return 0;
-#else
-    return g_hw_cputype == CPU_TYPE_ARM;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_neon()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return g_hwcaps & HWCAP_ASIMD;
-#else
-    return g_hwcaps & HWCAP_NEON;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return g_hw_cputype == CPU_TYPE_ARM64;
-#else
-    return g_hw_cputype == CPU_TYPE_ARM && g_hw_cpusubtype > CPU_SUBTYPE_ARM_V7;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_vfpv4()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    // neon always enable fma and fp16
-    return g_hwcaps & HWCAP_ASIMD;
-#else
-    return g_hwcaps & HWCAP_VFPv4;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return g_hw_cputype == CPU_TYPE_ARM64;
-#else
-    return g_hw_cputype == CPU_TYPE_ARM && g_hw_cpusubtype > CPU_SUBTYPE_ARM_V7S;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_asimdhp()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return g_hwcaps & HWCAP_ASIMDHP;
-#else
-    return 0;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return g_hw_optional_arm_FEAT_FP16
-           || g_hw_cpufamily == CPUFAMILY_ARM_MONSOON_MISTRAL
-           || g_hw_cpufamily == CPUFAMILY_ARM_VORTEX_TEMPEST
-           || g_hw_cpufamily == CPUFAMILY_ARM_LIGHTNING_THUNDER
-           || g_hw_cpufamily == CPUFAMILY_ARM_FIRESTORM_ICESTORM
-           || g_hw_cpufamily == CPUFAMILY_ARM_AVALANCHE_BLIZZARD
-           || g_hw_cpufamily == CPUFAMILY_ARM_EVEREST_SAWTOOTH;
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_asimddp()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return g_hwcaps & HWCAP_ASIMDDP;
-#else
-    return 0;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return g_hw_optional_arm_FEAT_DotProd
-           || g_hw_cpufamily == CPUFAMILY_ARM_LIGHTNING_THUNDER
-           || g_hw_cpufamily == CPUFAMILY_ARM_FIRESTORM_ICESTORM
-           || g_hw_cpufamily == CPUFAMILY_ARM_AVALANCHE_BLIZZARD
-           || g_hw_cpufamily == CPUFAMILY_ARM_EVEREST_SAWTOOTH;
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_asimdfhm()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return g_hwcaps & HWCAP_ASIMDFHM;
-#else
-    return 0;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return g_hw_optional_arm_FEAT_FHM
-           || g_hw_cpufamily == CPUFAMILY_ARM_LIGHTNING_THUNDER
-           || g_hw_cpufamily == CPUFAMILY_ARM_FIRESTORM_ICESTORM
-           || g_hw_cpufamily == CPUFAMILY_ARM_AVALANCHE_BLIZZARD
-           || g_hw_cpufamily == CPUFAMILY_ARM_EVEREST_SAWTOOTH;
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_bf16()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return g_hwcaps2 & HWCAP2_BF16;
-#else
-    return 0;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return g_hw_optional_arm_FEAT_BF16
-           || g_hw_cpufamily == CPUFAMILY_ARM_AVALANCHE_BLIZZARD
-           || g_hw_cpufamily == CPUFAMILY_ARM_EVEREST_SAWTOOTH;
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_i8mm()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return g_hwcaps2 & HWCAP2_I8MM;
-#else
-    return 0;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return g_hw_optional_arm_FEAT_I8MM
-           || g_hw_cpufamily == CPUFAMILY_ARM_AVALANCHE_BLIZZARD
-           || g_hw_cpufamily == CPUFAMILY_ARM_EVEREST_SAWTOOTH;
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_sve()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return g_hwcaps & HWCAP_SVE;
-#else
-    return 0;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return 0; // no known apple cpu support armv8.6 sve
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_sve2()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return g_hwcaps2 & HWCAP2_SVE2;
-#else
-    return 0;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return 0; // no known apple cpu support armv8.6 sve2
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_svebf16()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return g_hwcaps2 & HWCAP2_SVEBF16;
-#else
-    return 0;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return 0; // no known apple cpu support armv8.6 svebf16
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_svei8mm()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return g_hwcaps2 & HWCAP2_SVEI8MM;
-#else
-    return 0;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return 0; // no known apple cpu support armv8.6 svei8mm
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_arm_svef32mm()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __aarch64__
-    return g_hwcaps2 & HWCAP2_SVEF32MM;
-#else
-    return 0;
-#endif
-#elif __APPLE__
-#if __aarch64__
-    return 0; // no known apple cpu support armv8.6 svef32mm
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
 
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
 static inline void x86_cpuid(int level, unsigned int out[4])
 {
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) && !defined(__clang__)
     __cpuid((int*)out, level);
 #elif defined(__clang__) || defined(__GNUC__)
     __get_cpuid(level, out, out + 1, out + 2, out + 3);
@@ -763,9 +506,6 @@ static inline int x86_get_xcr0()
 
 static int get_cpu_support_x86_avx()
 {
-#if !NCNN_AVX
-    return 0;
-#endif
     unsigned int cpu_info[4] = {0};
     x86_cpuid(0, cpu_info);
 
@@ -787,9 +527,6 @@ static int get_cpu_support_x86_avx()
 
 static int get_cpu_support_x86_fma()
 {
-#if !NCNN_FMA
-    return 0;
-#endif
     unsigned int cpu_info[4] = {0};
     x86_cpuid(0, cpu_info);
 
@@ -811,9 +548,6 @@ static int get_cpu_support_x86_fma()
 
 static int get_cpu_support_x86_xop()
 {
-#if !NCNN_XOP
-    return 0;
-#endif
     unsigned int cpu_info[4] = {0};
     x86_cpuid(0x80000000, cpu_info);
 
@@ -827,9 +561,6 @@ static int get_cpu_support_x86_xop()
 
 static int get_cpu_support_x86_f16c()
 {
-#if !NCNN_F16C
-    return 0;
-#endif
     unsigned int cpu_info[4] = {0};
     x86_cpuid(0, cpu_info);
 
@@ -844,9 +575,6 @@ static int get_cpu_support_x86_f16c()
 
 static int get_cpu_support_x86_avx2()
 {
-#if !NCNN_AVX2
-    return 0;
-#endif
     unsigned int cpu_info[4] = {0};
     x86_cpuid(0, cpu_info);
 
@@ -869,9 +597,6 @@ static int get_cpu_support_x86_avx2()
 
 static int get_cpu_support_x86_avx_vnni()
 {
-#if !NCNN_AVXVNNI
-    return 0;
-#endif
     unsigned int cpu_info[4] = {0};
     x86_cpuid(0, cpu_info);
 
@@ -894,9 +619,13 @@ static int get_cpu_support_x86_avx_vnni()
 
 static int get_cpu_support_x86_avx512()
 {
-#if !NCNN_AVX512
-    return 0;
-#endif
+#if __APPLE__
+    return get_hw_capability("hw.optional.avx512f")
+           && get_hw_capability("hw.optional.avx512bw")
+           && get_hw_capability("hw.optional.avx512cd")
+           && get_hw_capability("hw.optional.avx512dq")
+           && get_hw_capability("hw.optional.avx512vl");
+#else
     unsigned int cpu_info[4] = {0};
     x86_cpuid(0, cpu_info);
 
@@ -919,13 +648,14 @@ static int get_cpu_support_x86_avx512()
 
     x86_cpuid_sublevel(7, 0, cpu_info);
     return (cpu_info[1] & (1u << 16)) && (cpu_info[1] & (1u << 17)) && (cpu_info[1] & (1u << 28)) && (cpu_info[1] & (1u << 30)) && (cpu_info[1] & (1u << 31));
+#endif
 }
 
 static int get_cpu_support_x86_avx512_vnni()
 {
-#if !NCNN_AVX512VNNI
-    return 0;
-#endif
+#if __APPLE__
+    return get_hw_capability("hw.optional.avx512vnni");
+#else
     unsigned int cpu_info[4] = {0};
     x86_cpuid(0, cpu_info);
 
@@ -948,13 +678,14 @@ static int get_cpu_support_x86_avx512_vnni()
 
     x86_cpuid_sublevel(7, 0, cpu_info);
     return cpu_info[2] & (1u << 11);
+#endif
 }
 
 static int get_cpu_support_x86_avx512_bf16()
 {
-#if !NCNN_AVX512BF16
-    return 0;
-#endif
+#if __APPLE__
+    return get_hw_capability("hw.optional.avx512bf16");
+#else
     unsigned int cpu_info[4] = {0};
     x86_cpuid(0, cpu_info);
 
@@ -973,13 +704,14 @@ static int get_cpu_support_x86_avx512_bf16()
 
     x86_cpuid_sublevel(7, 1, cpu_info);
     return cpu_info[0] & (1u << 5);
+#endif
 }
 
 static int get_cpu_support_x86_avx512_fp16()
 {
-#if !NCNN_AVX512FP16
-    return 0;
-#endif
+#if __APPLE__
+    return get_hw_capability("hw.optional.avx512fp16");
+#else
     unsigned int cpu_info[4] = {0};
     x86_cpuid(0, cpu_info);
 
@@ -1002,179 +734,9 @@ static int get_cpu_support_x86_avx512_fp16()
 
     x86_cpuid_sublevel(7, 0, cpu_info);
     return cpu_info[3] & (1u << 23);
+#endif
 }
-
-static int g_cpu_support_x86_avx = get_cpu_support_x86_avx();
-static int g_cpu_support_x86_fma = get_cpu_support_x86_fma();
-static int g_cpu_support_x86_xop = get_cpu_support_x86_xop();
-static int g_cpu_support_x86_f16c = get_cpu_support_x86_f16c();
-static int g_cpu_support_x86_avx2 = get_cpu_support_x86_avx2();
-static int g_cpu_support_x86_avx_vnni = get_cpu_support_x86_avx_vnni();
-static int g_cpu_support_x86_avx512 = get_cpu_support_x86_avx512();
-static int g_cpu_support_x86_avx512_vnni = get_cpu_support_x86_avx512_vnni();
-static int g_cpu_support_x86_avx512_bf16 = get_cpu_support_x86_avx512_bf16();
-static int g_cpu_support_x86_avx512_fp16 = get_cpu_support_x86_avx512_fp16();
-#else  // defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
-static const int g_cpu_support_x86_avx = 0;
-static const int g_cpu_support_x86_fma = 0;
-static const int g_cpu_support_x86_xop = 0;
-static const int g_cpu_support_x86_f16c = 0;
-static const int g_cpu_support_x86_avx2 = 0;
-static const int g_cpu_support_x86_avx_vnni = 0;
-static const int g_cpu_support_x86_avx512 = 0;
-static const int g_cpu_support_x86_avx512_vnni = 0;
-static const int g_cpu_support_x86_avx512_bf16 = 0;
-static const int g_cpu_support_x86_avx512_fp16 = 0;
 #endif // defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
-
-int cpu_support_x86_avx()
-{
-    return g_cpu_support_x86_avx;
-}
-
-int cpu_support_x86_fma()
-{
-    return g_cpu_support_x86_fma;
-}
-
-int cpu_support_x86_xop()
-{
-    return g_cpu_support_x86_xop;
-}
-
-int cpu_support_x86_f16c()
-{
-    return g_cpu_support_x86_f16c;
-}
-
-int cpu_support_x86_avx2()
-{
-    return g_cpu_support_x86_avx2;
-}
-
-int cpu_support_x86_avx_vnni()
-{
-    return g_cpu_support_x86_avx_vnni;
-}
-
-int cpu_support_x86_avx512()
-{
-    return g_cpu_support_x86_avx512;
-}
-
-int cpu_support_x86_avx512_vnni()
-{
-    return g_cpu_support_x86_avx512_vnni;
-}
-
-int cpu_support_x86_avx512_bf16()
-{
-    return g_cpu_support_x86_avx512_bf16;
-}
-
-int cpu_support_x86_avx512_fp16()
-{
-    return g_cpu_support_x86_avx512_fp16;
-}
-
-int cpu_support_mips_msa()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __mips__
-    return g_hwcaps & HWCAP_MIPS_MSA;
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_loongarch_lsx()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __loongarch64
-    return g_hwcaps & HWCAP_LOONGARCH_LSX;
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_loongarch_lasx()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __loongarch64
-    return g_hwcaps & HWCAP_LOONGARCH_LASX;
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_loongson_mmi()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __mips__
-    return g_hwcaps & HWCAP_LOONGSON_MMI;
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_riscv_v()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __riscv
-    return g_hwcaps & COMPAT_HWCAP_ISA_V;
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_support_riscv_zfh()
-{
-#if defined __ANDROID__ || defined __linux__
-#if __riscv
-    // v + f does not imply zfh, but how to discover zfh properly ?
-    // upstream issue https://github.com/riscv/riscv-isa-manual/issues/414
-    return g_hwcaps & COMPAT_HWCAP_ISA_V && g_hwcaps & COMPAT_HWCAP_ISA_F;
-#else
-    return 0;
-#endif
-#else
-    return 0;
-#endif
-}
-
-int cpu_riscv_vlenb()
-{
-#if __riscv
-    if (!cpu_support_riscv_v())
-        return 0;
-
-    int a = 0;
-    asm volatile(
-        ".word  0xc22026f3  \n" // csrr  a3, vlenb
-        "mv     %0, a3      \n"
-        : "=r"(a)
-        :
-        : "memory", "a3");
-    return a;
-#else
-    return 0;
-#endif
-}
 
 static int get_cpucount()
 {
@@ -1184,7 +746,7 @@ static int get_cpucount()
         count = emscripten_num_logical_cores();
     else
         count = 1;
-#elif (defined _WIN32 && !(defined __MINGW32__))
+#elif defined _WIN32
     SYSTEM_INFO system_info;
     GetSystemInfo(&system_info);
     count = system_info.dwNumberOfProcessors;
@@ -1225,24 +787,6 @@ static int get_cpucount()
     return count;
 }
 
-static int g_cpucount = get_cpucount();
-
-int get_cpu_count()
-{
-    return g_cpucount;
-}
-
-int get_little_cpu_count()
-{
-    return get_cpu_thread_affinity_mask(1).num_enabled();
-}
-
-int get_big_cpu_count()
-{
-    int big_cpu_count = get_cpu_thread_affinity_mask(2).num_enabled();
-    return big_cpu_count ? big_cpu_count : g_cpucount;
-}
-
 #if defined __ANDROID__ || defined __linux__
 static int get_thread_siblings(int cpuid)
 {
@@ -1269,7 +813,7 @@ static int get_thread_siblings(int cpuid)
 static int get_physical_cpucount()
 {
     int count = 0;
-#if (defined _WIN32 && !(defined __MINGW32__))
+#if defined _WIN32
     typedef BOOL(WINAPI * LPFN_GLPI)(PSYSTEM_LOGICAL_PROCESSOR_INFORMATION, PDWORD);
     LPFN_GLPI glpi = (LPFN_GLPI)GetProcAddress(GetModuleHandle(TEXT("kernel32")), "GetLogicalProcessorInformation");
     if (glpi == NULL)
@@ -1338,29 +882,6 @@ static int get_physical_cpucount()
     return count;
 }
 
-static int g_physical_cpucount = get_physical_cpucount();
-
-int get_physical_cpu_count()
-{
-    return g_physical_cpucount;
-}
-
-int get_physical_little_cpu_count()
-{
-    if (g_physical_cpucount == g_cpucount)
-        return get_little_cpu_count();
-
-    return g_physical_cpucount * 2 - g_cpucount;
-}
-
-int get_physical_big_cpu_count()
-{
-    if (g_physical_cpucount == g_cpucount)
-        return get_big_cpu_count();
-
-    return g_cpucount - g_physical_cpucount;
-}
-
 #if defined __ANDROID__ || defined __linux__
 static int get_data_cache_size(int cpuid, int level)
 {
@@ -1417,16 +938,16 @@ static int get_data_cache_size(int cpuid, int level)
             return 0;
 
         int nscan = fscanf(fp, "%dK", &cache_size_K);
+        fclose(fp);
         if (nscan != 1)
         {
             NCNN_LOGE("fscanf cache_size_K error %d", nscan);
             return 0;
         }
-        fclose(fp);
     }
 
     // parse shared_cpu_map mask
-    CpuSet shared_cpu_map;
+    ncnn::CpuSet shared_cpu_map;
     {
         sprintf(path, "/sys/devices/system/cpu/cpu%d/cache/index%d/shared_cpu_map", cpuid, indexid);
         FILE* fp = fopen(path, "rb");
@@ -1435,12 +956,12 @@ static int get_data_cache_size(int cpuid, int level)
 
         char shared_cpu_map_str[256];
         int nscan = fscanf(fp, "%255s", shared_cpu_map_str);
+        fclose(fp);
         if (nscan != 1)
         {
             NCNN_LOGE("fscanf shared_cpu_map error %d", nscan);
             return 0;
         }
-        fclose(fp);
 
         int len = strlen(shared_cpu_map_str);
 
@@ -1508,8 +1029,7 @@ static int get_data_cache_size(int cpuid, int level)
 
 static int get_big_cpu_data_cache_size(int level)
 {
-    const CpuSet& big_cs = get_cpu_thread_affinity_mask(2);
-    if (big_cs.num_enabled() == 0)
+    if (g_cpu_affinity_mask_big.num_enabled() == 0)
     {
         // smp cpu
         return get_data_cache_size(0, level);
@@ -1517,7 +1037,7 @@ static int get_big_cpu_data_cache_size(int level)
 
     for (int i = 0; i < g_cpucount; i++)
     {
-        if (big_cs.is_enabled(i))
+        if (g_cpu_affinity_mask_big.is_enabled(i))
         {
             return get_data_cache_size(i, level);
         }
@@ -1531,7 +1051,7 @@ static int get_big_cpu_data_cache_size(int level)
 static int get_cpu_level2_cachesize()
 {
     int size = 0;
-#if (defined _WIN32 && !(defined __MINGW32__))
+#if defined _WIN32
     typedef BOOL(WINAPI * LPFN_GLPI)(PSYSTEM_LOGICAL_PROCESSOR_INFORMATION, PDWORD);
     LPFN_GLPI glpi = (LPFN_GLPI)GetProcAddress(GetModuleHandle(TEXT("kernel32")), "GetLogicalProcessorInformation");
     if (glpi != NULL)
@@ -1579,11 +1099,11 @@ static int get_cpu_level2_cachesize()
     {
 #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
         size = 64 * 1024;
-        if (cpu_support_x86_avx())
+        if (g_cpu_support_x86_avx)
             size = 128 * 1024;
-        if (cpu_support_x86_avx2())
+        if (g_cpu_support_x86_avx2)
             size = 256 * 1024;
-        if (cpu_support_x86_avx512())
+        if (g_cpu_support_x86_avx512)
             size = 1024 * 1024;
 #elif __aarch64__
         size = 256 * 1024;
@@ -1601,7 +1121,7 @@ static int get_cpu_level2_cachesize()
 static int get_cpu_level3_cachesize()
 {
     int size = 0;
-#if (defined _WIN32 && !(defined __MINGW32__))
+#if defined _WIN32
     typedef BOOL(WINAPI * LPFN_GLPI)(PSYSTEM_LOGICAL_PROCESSOR_INFORMATION, PDWORD);
     LPFN_GLPI glpi = (LPFN_GLPI)GetProcAddress(GetModuleHandle(TEXT("kernel32")), "GetLogicalProcessorInformation");
     if (glpi != NULL)
@@ -1648,23 +1168,10 @@ static int get_cpu_level3_cachesize()
     return size;
 }
 
-static int g_cpu_level2_cachesize = get_cpu_level2_cachesize();
-static int g_cpu_level3_cachesize = get_cpu_level3_cachesize();
-
-int get_cpu_level2_cache_size()
+#if defined _WIN32
+static ncnn::CpuSet get_smt_cpu_mask()
 {
-    return g_cpu_level2_cachesize;
-}
-
-int get_cpu_level3_cache_size()
-{
-    return g_cpu_level3_cachesize;
-}
-
-#if (defined _WIN32 && !(defined __MINGW32__))
-static CpuSet get_smt_cpu_mask()
-{
-    CpuSet smt_cpu_mask;
+    ncnn::CpuSet smt_cpu_mask;
 
     typedef BOOL(WINAPI * LPFN_GLPI)(PSYSTEM_LOGICAL_PROCESSOR_INFORMATION, PDWORD);
     LPFN_GLPI glpi = (LPFN_GLPI)GetProcAddress(GetModuleHandle(TEXT("kernel32")), "GetLogicalProcessorInformation");
@@ -1686,7 +1193,7 @@ static CpuSet get_smt_cpu_mask()
     {
         if (ptr->Relationship == RelationProcessorCore)
         {
-            CpuSet smt_set;
+            ncnn::CpuSet smt_set;
             smt_set.mask = ptr->ProcessorMask;
             if (smt_set.num_enabled() > 1)
             {
@@ -1744,7 +1251,7 @@ static std::vector<int> get_max_freq_mhz()
     return ret;
 }
 
-static int set_sched_affinity(const CpuSet& thread_affinity_mask)
+static int set_sched_affinity(const ncnn::CpuSet& thread_affinity_mask)
 {
     DWORD_PTR prev_mask = SetThreadAffinityMask(GetCurrentThread(), thread_affinity_mask.mask);
     if (prev_mask == 0)
@@ -1755,7 +1262,7 @@ static int set_sched_affinity(const CpuSet& thread_affinity_mask)
 
     return 0;
 }
-#endif // (defined _WIN32 && !(defined __MINGW32__))
+#endif // defined _WIN32
 
 #if defined __ANDROID__ || defined __linux__
 static int get_max_freq_khz(int cpuid)
@@ -1865,10 +1372,10 @@ static bool is_smt_cpu(int cpuid)
     return is_smt;
 }
 
-static int set_sched_affinity(const CpuSet& thread_affinity_mask)
+static int set_sched_affinity(const ncnn::CpuSet& thread_affinity_mask)
 {
     // set affinity for thread
-#if defined(__BIONIC__)
+#if defined(__BIONIC__) && !defined(__OHOS__)
     pid_t pid = gettid();
 #else
     pid_t pid = syscall(SYS_gettid);
@@ -1886,7 +1393,7 @@ static int set_sched_affinity(const CpuSet& thread_affinity_mask)
 #endif // defined __ANDROID__ || defined __linux__
 
 #if __APPLE__
-static int set_sched_affinity(const CpuSet& thread_affinity_mask)
+static int set_sched_affinity(const ncnn::CpuSet& thread_affinity_mask)
 {
     // https://developer.apple.com/library/archive/releasenotes/Performance/RN-AffinityAPI/index.html
     // http://www.hybridkernel.com/2015/01/18/binding_threads_to_cores_osx.html
@@ -1921,47 +1428,15 @@ static int set_sched_affinity(const CpuSet& thread_affinity_mask)
 }
 #endif // __APPLE__
 
-static int g_powersave = 0;
-
-int get_cpu_powersave()
-{
-    return g_powersave;
-}
-
-int set_cpu_powersave(int powersave)
-{
-    if (powersave < 0 || powersave > 2)
-    {
-        NCNN_LOGE("powersave %d not supported", powersave);
-        return -1;
-    }
-
-    const CpuSet& thread_affinity_mask = get_cpu_thread_affinity_mask(powersave);
-
-    int ret = set_cpu_thread_affinity(thread_affinity_mask);
-    if (ret != 0)
-        return ret;
-
-    g_powersave = powersave;
-
-    return 0;
-}
-
-class cpu_thread_affinity_mask
-{
-public:
-    cpu_thread_affinity_mask();
-
-    CpuSet mask_all;
-    CpuSet mask_little;
-    CpuSet mask_big;
-};
-
-cpu_thread_affinity_mask::cpu_thread_affinity_mask()
+static void initialize_cpu_thread_affinity_mask(ncnn::CpuSet& mask_all, ncnn::CpuSet& mask_little, ncnn::CpuSet& mask_big)
 {
     mask_all.disable_all();
+    for (int i = 0; i < g_cpucount; i++)
+    {
+        mask_all.enable(i);
+    }
 
-#if (defined _WIN32 && !(defined __MINGW32__))
+#if defined _WIN32
     // get max freq mhz for all cores
     int max_freq_mhz_min = INT_MAX;
     int max_freq_mhz_max = 0;
@@ -1986,7 +1461,7 @@ cpu_thread_affinity_mask::cpu_thread_affinity_mask()
         return;
     }
 
-    CpuSet smt_cpu_mask = get_smt_cpu_mask();
+    ncnn::CpuSet smt_cpu_mask = get_smt_cpu_mask();
 
     for (int i = 0; i < g_cpucount; i++)
     {
@@ -2070,31 +1545,1151 @@ cpu_thread_affinity_mask::cpu_thread_affinity_mask()
 #endif
 }
 
-static cpu_thread_affinity_mask g_thread_affinity_mask;
+#if defined __ANDROID__ || defined __linux__
+#if __aarch64__
+union midr_info_t
+{
+    struct __attribute__((packed))
+    {
+        unsigned int revision : 4;
+        unsigned int part : 12;
+        unsigned int architecture : 4;
+        unsigned int variant : 4;
+        unsigned int implementer : 8;
+    };
+    unsigned int midr;
+
+    midr_info_t(unsigned int _midr)
+        : midr(_midr)
+    {
+    }
+};
+
+static unsigned int get_midr_from_sysfs(int cpuid)
+{
+    char path[256];
+    sprintf(path, "/sys/devices/system/cpu/cpu%d/regs/identification/midr_el1", cpuid);
+
+    FILE* fp = fopen(path, "rb");
+    if (!fp)
+        return 0;
+
+    unsigned int midr_el1 = 0;
+    int nscan = fscanf(fp, "%x", &midr_el1);
+    if (nscan != 1)
+    {
+        // ignore
+    }
+
+    fclose(fp);
+
+    return midr_el1;
+}
+
+static int get_midr_from_proc_cpuinfo(std::vector<unsigned int>& midrs)
+{
+    FILE* fp = fopen("/proc/cpuinfo", "rb");
+    if (!fp)
+        return -1;
+
+    midrs.resize(g_cpucount, 0);
+
+    int cpuid = -1;
+    midr_info_t midr_info(0);
+
+    char line[1024];
+    while (!feof(fp))
+    {
+        char* s = fgets(line, 1024, fp);
+        if (!s)
+            break;
+
+        if (memcmp(line, "processor", 9) == 0)
+        {
+            // processor       : 4
+            int id = -1;
+            int nscan = sscanf(line, "%*[^:]: %d", &id);
+            if (nscan != 1)
+                continue;
+
+            if (cpuid >= 0 && cpuid < g_cpucount)
+            {
+                if (midr_info.midr == 0)
+                {
+                    // shared midr
+                    midrs[cpuid] = (unsigned int)-1;
+                }
+                else
+                {
+                    // save midr and reset
+                    midrs[cpuid] = midr_info.midr;
+                    for (int i = 0; i < g_cpucount; i++)
+                    {
+                        if (midrs[i] == (unsigned int)-1)
+                            midrs[i] = midr_info.midr;
+                    }
+                }
+
+                midr_info.midr = 0;
+            }
+
+            cpuid = id;
+        }
+
+        if (cpuid == -1)
+            continue;
+
+        if (memcmp(line, "CPU implementer", 15) == 0)
+        {
+            // CPU implementer : 0x51
+            unsigned int id = 0;
+            int nscan = sscanf(line, "%*[^:]: %x", &id);
+            if (nscan != 1)
+                continue;
+
+            midr_info.implementer = id;
+        }
+        else if (memcmp(line, "CPU architecture", 16) == 0)
+        {
+            // CPU architecture: 8
+            int id = 0;
+            int nscan = sscanf(line, "%*[^:]: %d", &id);
+            if (nscan != 1)
+                continue;
+
+            midr_info.architecture = id;
+        }
+        else if (memcmp(line, "CPU variant", 11) == 0)
+        {
+            // CPU variant     : 0xd
+            int id = 0;
+            int nscan = sscanf(line, "%*[^:]: %x", &id);
+            if (nscan != 1)
+                continue;
+
+            midr_info.variant = id;
+        }
+        else if (memcmp(line, "CPU part", 8) == 0)
+        {
+            // CPU part        : 0x804
+            int id = 0;
+            int nscan = sscanf(line, "%*[^:]: %x", &id);
+            if (nscan != 1)
+                continue;
+
+            midr_info.part = id;
+        }
+        else if (memcmp(line, "CPU revision", 12) == 0)
+        {
+            // CPU revision    : 14
+            int id = 0;
+            int nscan = sscanf(line, "%*[^:]: %d", &id);
+            if (nscan != 1)
+                continue;
+
+            midr_info.revision = id;
+        }
+    }
+
+    fclose(fp);
+
+    if (cpuid >= 0 && cpuid < g_cpucount)
+    {
+        if (midr_info.midr == 0)
+        {
+            // shared midr
+            midrs[cpuid] = (unsigned int)-1;
+        }
+        else
+        {
+            // save midr and reset
+            midrs[cpuid] = midr_info.midr;
+            for (int i = 0; i < g_cpucount; i++)
+            {
+                if (midrs[i] == (unsigned int)-1)
+                    midrs[i] = midr_info.midr;
+            }
+        }
+
+        midr_info.midr = 0;
+    }
+
+    // /proc/cpuinfo may only report little/online cores on old kernel
+    if (g_cpu_affinity_mask_big.num_enabled() == g_cpucount)
+    {
+        // assign the remaining unknown midrs for smp cpu
+        for (int i = 0; i < g_cpucount; i++)
+        {
+            if (midrs[i] == 0)
+                midrs[i] = midr_info.midr;
+        }
+    }
+    else
+    {
+        // clear the big core midrs for hmp cpu if they are the same as little cores
+        unsigned int little_midr = 0;
+        for (int i = 0; i < g_cpucount; i++)
+        {
+            if (g_cpu_affinity_mask_little.is_enabled(i))
+            {
+                little_midr = midrs[i];
+                break;
+            }
+        }
+
+        for (int i = 0; i < g_cpucount; i++)
+        {
+            if (g_cpu_affinity_mask_big.is_enabled(i))
+            {
+                if (midrs[i] == little_midr)
+                {
+                    midrs[i] = 0;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+// return midr for the current running core
+static unsigned int get_midr_from_register()
+{
+    uint64_t midr;
+    asm volatile("mrs   %0, MIDR_EL1"
+                 : "=r"(midr));
+
+    return (unsigned int)midr;
+}
+
+static int get_sched_affinity(ncnn::CpuSet& thread_affinity_mask)
+{
+    // get affinity for thread
+#if defined(__BIONIC__) && !defined(__OHOS__)
+    pid_t pid = gettid();
+#else
+    pid_t pid = syscall(SYS_gettid);
+#endif
+
+    thread_affinity_mask.disable_all();
+
+    int syscallret = syscall(__NR_sched_getaffinity, pid, sizeof(cpu_set_t), &thread_affinity_mask.cpu_set);
+    if (syscallret)
+    {
+        // handle get error silently
+        return -1;
+    }
+
+    return 0;
+}
+
+static int midr_is_a53_a55(unsigned int midr)
+{
+    // 0x 41 ? f d03 ? = arm cortex-a53
+    // 0x 51 ? f 801 ? = qcom kryo200 a53
+    // 0x 41 ? f d04 ? = arm cortex-a35
+    // 0x 41 ? f d05 ? = arm cortex-a55
+    // 0x 51 ? f 803 ? = qcom kryo300 a55
+    // 0x 51 ? f 805 ? = qcom kryo400 a55
+
+    midr_info_t midr_info(midr);
+
+    return (midr_info.implementer == 0x41 && midr_info.part == 0xd03)
+           || (midr_info.implementer == 0x51 && midr_info.part == 0x801)
+           || (midr_info.implementer == 0x41 && midr_info.part == 0xd04)
+           || (midr_info.implementer == 0x41 && midr_info.part == 0xd05)
+           || (midr_info.implementer == 0x51 && midr_info.part == 0x803)
+           || (midr_info.implementer == 0x51 && midr_info.part == 0x805);
+}
+
+static int detect_cpu_is_arm_a53_a55()
+{
+    int a53_a55_cpu_count = 0;
+
+    // first try, iterate /sys/devices/system/cpu/cpuX/regs/identification/midr_el1
+    bool sysfs_midr = true;
+    for (int i = 0; i < g_cpucount; i++)
+    {
+        unsigned int midr = 0;
+
+        // for kernel 4.7+
+        midr = get_midr_from_sysfs(i);
+        if (midr == 0)
+        {
+            sysfs_midr = false;
+            break;
+        }
+
+        if (midr_is_a53_a55(midr))
+        {
+            a53_a55_cpu_count++;
+        }
+    }
+
+    if (!sysfs_midr)
+    {
+        // second try, collect midr from /proc/cpuinfo
+        std::vector<unsigned int> midrs;
+        int ret = get_midr_from_proc_cpuinfo(midrs);
+        if (ret == 0 && (int)midrs.size() == g_cpucount)
+        {
+            for (int i = 0; i < g_cpucount; i++)
+            {
+                if (midr_is_a53_a55(midrs[i]))
+                {
+                    a53_a55_cpu_count++;
+                }
+            }
+        }
+        else
+        {
+            // third try, assume all aarch64 little cores are a53/a55
+            a53_a55_cpu_count = g_cpu_affinity_mask_little.num_enabled();
+        }
+    }
+
+    if (a53_a55_cpu_count == 0)
+        return 0; // all non a53/a55
+
+    if (a53_a55_cpu_count == g_cpucount)
+        return 1; // all a53/a55
+
+    // little cores are a53/a55
+    return 2;
+}
+#endif // __aarch64__
+#endif // defined __ANDROID__ || defined __linux__
+
+// the initialization
+static void initialize_global_cpu_info()
+{
+    g_cpucount = get_cpucount();
+    g_physical_cpucount = get_physical_cpucount();
+    g_powersave = 0;
+    initialize_cpu_thread_affinity_mask(g_cpu_affinity_mask_all, g_cpu_affinity_mask_little, g_cpu_affinity_mask_big);
+
+#if (defined _WIN32 && (__aarch64__ || __arm__))
+    if (!is_being_debugged())
+    {
+        ruapu_init();
+    }
+#endif
+
+#if defined _WIN32
+#if __aarch64__
+    g_cpu_support_arm_cpuid = ruapu_supports("cpuid");
+    g_cpu_support_arm_asimdhp = ruapu_supports("asimdhp") || IsProcessorFeaturePresent(43); // dp implies hp
+    g_cpu_support_arm_asimddp = ruapu_supports("asimddp") || IsProcessorFeaturePresent(43); // 43 is PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE
+    g_cpu_support_arm_asimdfhm = ruapu_supports("asimdfhm");
+    g_cpu_support_arm_bf16 = ruapu_supports("bf16");
+    g_cpu_support_arm_i8mm = ruapu_supports("i8mm");
+    g_cpu_support_arm_sve = ruapu_supports("sve");
+    g_cpu_support_arm_sve2 = ruapu_supports("sve2");
+    g_cpu_support_arm_svebf16 = ruapu_supports("svebf16");
+    g_cpu_support_arm_svei8mm = ruapu_supports("svei8mm");
+    g_cpu_support_arm_svef32mm = ruapu_supports("svef32mm");
+#elif __arm__
+    g_cpu_support_arm_edsp = ruapu_supports("edsp");
+    g_cpu_support_arm_neon = 1; // all modern windows arm devices have neon
+    g_cpu_support_arm_vfpv4 = ruapu_supports("vfpv4");
+#endif // __aarch64__ || __arm__
+#elif defined __ANDROID__ || defined __linux__
+    g_hwcaps = get_elf_hwcap(AT_HWCAP);
+    g_hwcaps2 = get_elf_hwcap(AT_HWCAP2);
+#elif __APPLE__
+    g_hw_cpufamily = get_hw_cpufamily();
+    g_hw_cputype = get_hw_cputype();
+    g_hw_cpusubtype = get_hw_cpusubtype();
+#if __aarch64__
+    g_hw_optional_arm_FEAT_FP16 = get_hw_capability("hw.optional.arm.FEAT_FP16");
+    g_hw_optional_arm_FEAT_DotProd = get_hw_capability("hw.optional.arm.FEAT_DotProd");
+    g_hw_optional_arm_FEAT_FHM = get_hw_capability("hw.optional.arm.FEAT_FHM");
+    g_hw_optional_arm_FEAT_BF16 = get_hw_capability("hw.optional.arm.FEAT_BF16");
+    g_hw_optional_arm_FEAT_I8MM = get_hw_capability("hw.optional.arm.FEAT_I8MM");
+#endif // __aarch64__
+#endif
+
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    g_cpu_support_x86_avx = get_cpu_support_x86_avx();
+    g_cpu_support_x86_fma = get_cpu_support_x86_fma();
+    g_cpu_support_x86_xop = get_cpu_support_x86_xop();
+    g_cpu_support_x86_f16c = get_cpu_support_x86_f16c();
+    g_cpu_support_x86_avx2 = get_cpu_support_x86_avx2();
+    g_cpu_support_x86_avx_vnni = get_cpu_support_x86_avx_vnni();
+    g_cpu_support_x86_avx512 = get_cpu_support_x86_avx512();
+    g_cpu_support_x86_avx512_vnni = get_cpu_support_x86_avx512_vnni();
+    g_cpu_support_x86_avx512_bf16 = get_cpu_support_x86_avx512_bf16();
+    g_cpu_support_x86_avx512_fp16 = get_cpu_support_x86_avx512_fp16();
+#endif // defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+
+    g_cpu_level2_cachesize = get_cpu_level2_cachesize();
+    g_cpu_level3_cachesize = get_cpu_level3_cachesize();
+
+#if defined __ANDROID__ || defined __linux__
+#if __aarch64__
+    g_cpu_is_arm_a53_a55 = detect_cpu_is_arm_a53_a55();
+#endif // __aarch64__
+#endif // defined __ANDROID__ || defined __linux__
+}
+
+static int g_cpu_info_initialized = 0;
+
+static inline void try_initialize_global_cpu_info()
+{
+    if (!g_cpu_info_initialized)
+    {
+        initialize_global_cpu_info();
+        g_cpu_info_initialized = 1;
+    }
+}
+
+namespace ncnn {
+
+#if defined _WIN32
+CpuSet::CpuSet()
+{
+    disable_all();
+}
+
+void CpuSet::enable(int cpu)
+{
+    mask |= ((ULONG_PTR)1 << cpu);
+}
+
+void CpuSet::disable(int cpu)
+{
+    mask &= ~((ULONG_PTR)1 << cpu);
+}
+
+void CpuSet::disable_all()
+{
+    mask = 0;
+}
+
+bool CpuSet::is_enabled(int cpu) const
+{
+    return mask & ((ULONG_PTR)1 << cpu);
+}
+
+int CpuSet::num_enabled() const
+{
+    int num_enabled = 0;
+    for (int i = 0; i < (int)sizeof(mask) * 8; i++)
+    {
+        if (is_enabled(i))
+            num_enabled++;
+    }
+
+    return num_enabled;
+}
+#elif defined __ANDROID__ || defined __linux__
+CpuSet::CpuSet()
+{
+    disable_all();
+}
+
+void CpuSet::enable(int cpu)
+{
+    CPU_SET(cpu, &cpu_set);
+}
+
+void CpuSet::disable(int cpu)
+{
+    CPU_CLR(cpu, &cpu_set);
+}
+
+void CpuSet::disable_all()
+{
+    CPU_ZERO(&cpu_set);
+}
+
+bool CpuSet::is_enabled(int cpu) const
+{
+    return CPU_ISSET(cpu, &cpu_set);
+}
+
+int CpuSet::num_enabled() const
+{
+    int num_enabled = 0;
+    for (int i = 0; i < (int)sizeof(cpu_set_t) * 8; i++)
+    {
+        if (is_enabled(i))
+            num_enabled++;
+    }
+
+    return num_enabled;
+}
+#elif __APPLE__
+CpuSet::CpuSet()
+{
+    disable_all();
+}
+
+void CpuSet::enable(int cpu)
+{
+    policy |= ((unsigned int)1 << cpu);
+}
+
+void CpuSet::disable(int cpu)
+{
+    policy &= ~((unsigned int)1 << cpu);
+}
+
+void CpuSet::disable_all()
+{
+    policy = 0;
+}
+
+bool CpuSet::is_enabled(int cpu) const
+{
+    return policy & ((unsigned int)1 << cpu);
+}
+
+int CpuSet::num_enabled() const
+{
+    int num_enabled = 0;
+    for (int i = 0; i < (int)sizeof(policy) * 8; i++)
+    {
+        if (is_enabled(i))
+            num_enabled++;
+    }
+
+    return num_enabled;
+}
+#else
+CpuSet::CpuSet()
+{
+}
+
+void CpuSet::enable(int /* cpu */)
+{
+}
+
+void CpuSet::disable(int /* cpu */)
+{
+}
+
+void CpuSet::disable_all()
+{
+}
+
+bool CpuSet::is_enabled(int /* cpu */) const
+{
+    return true;
+}
+
+int CpuSet::num_enabled() const
+{
+    return get_cpu_count();
+}
+#endif
+
+int cpu_support_arm_edsp()
+{
+    try_initialize_global_cpu_info();
+#if __arm__ && !__aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_edsp;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps & HWCAP_EDSP;
+#elif __APPLE__
+    return g_hw_cputype == CPU_TYPE_ARM;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_neon()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+    return 1;
+#elif __arm__
+#if defined _WIN32
+    return g_cpu_support_arm_neon;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps & HWCAP_NEON;
+#elif __APPLE__
+    return g_hw_cputype == CPU_TYPE_ARM && g_hw_cpusubtype > CPU_SUBTYPE_ARM_V7;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_vfpv4()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+    return 1;
+#elif __arm__
+#if defined _WIN32
+    return g_cpu_support_arm_vfpv4;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps & HWCAP_VFPv4;
+#elif __APPLE__
+    return g_hw_cputype == CPU_TYPE_ARM && g_hw_cpusubtype > CPU_SUBTYPE_ARM_V7S;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_asimdhp()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_asimdhp;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps & HWCAP_ASIMDHP;
+#elif __APPLE__
+    return g_hw_optional_arm_FEAT_FP16
+           || g_hw_cpufamily == CPUFAMILY_ARM_MONSOON_MISTRAL
+           || g_hw_cpufamily == CPUFAMILY_ARM_VORTEX_TEMPEST
+           || g_hw_cpufamily == CPUFAMILY_ARM_LIGHTNING_THUNDER
+           || g_hw_cpufamily == CPUFAMILY_ARM_FIRESTORM_ICESTORM
+           || g_hw_cpufamily == CPUFAMILY_ARM_AVALANCHE_BLIZZARD
+           || g_hw_cpufamily == CPUFAMILY_ARM_EVEREST_SAWTOOTH
+           || g_hw_cpufamily == CPUFAMILY_ARM_COLL
+           || g_hw_cpufamily == CPUFAMILY_ARM_IBIZA
+           || g_hw_cpufamily == CPUFAMILY_ARM_LOBOS
+           || g_hw_cpufamily == CPUFAMILY_ARM_PALMA;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_cpuid()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_cpuid;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps & HWCAP_CPUID;
+#elif __APPLE__
+    return 0;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_asimddp()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_asimddp;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps & HWCAP_ASIMDDP;
+#elif __APPLE__
+    return g_hw_optional_arm_FEAT_DotProd
+           || g_hw_cpufamily == CPUFAMILY_ARM_LIGHTNING_THUNDER
+           || g_hw_cpufamily == CPUFAMILY_ARM_FIRESTORM_ICESTORM
+           || g_hw_cpufamily == CPUFAMILY_ARM_AVALANCHE_BLIZZARD
+           || g_hw_cpufamily == CPUFAMILY_ARM_EVEREST_SAWTOOTH
+           || g_hw_cpufamily == CPUFAMILY_ARM_COLL
+           || g_hw_cpufamily == CPUFAMILY_ARM_IBIZA
+           || g_hw_cpufamily == CPUFAMILY_ARM_LOBOS
+           || g_hw_cpufamily == CPUFAMILY_ARM_PALMA;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_asimdfhm()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_asimdfhm;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps & HWCAP_ASIMDFHM;
+#elif __APPLE__
+    return g_hw_optional_arm_FEAT_FHM
+           || g_hw_cpufamily == CPUFAMILY_ARM_LIGHTNING_THUNDER
+           || g_hw_cpufamily == CPUFAMILY_ARM_FIRESTORM_ICESTORM
+           || g_hw_cpufamily == CPUFAMILY_ARM_AVALANCHE_BLIZZARD
+           || g_hw_cpufamily == CPUFAMILY_ARM_EVEREST_SAWTOOTH
+           || g_hw_cpufamily == CPUFAMILY_ARM_COLL
+           || g_hw_cpufamily == CPUFAMILY_ARM_IBIZA
+           || g_hw_cpufamily == CPUFAMILY_ARM_LOBOS
+           || g_hw_cpufamily == CPUFAMILY_ARM_PALMA;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_bf16()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_bf16;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps2 & HWCAP2_BF16;
+#elif __APPLE__
+    return g_hw_optional_arm_FEAT_BF16
+           || g_hw_cpufamily == CPUFAMILY_ARM_AVALANCHE_BLIZZARD
+           || g_hw_cpufamily == CPUFAMILY_ARM_EVEREST_SAWTOOTH
+           || g_hw_cpufamily == CPUFAMILY_ARM_COLL
+           || g_hw_cpufamily == CPUFAMILY_ARM_IBIZA
+           || g_hw_cpufamily == CPUFAMILY_ARM_LOBOS
+           || g_hw_cpufamily == CPUFAMILY_ARM_PALMA;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_i8mm()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_i8mm;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps2 & HWCAP2_I8MM;
+#elif __APPLE__
+    return g_hw_optional_arm_FEAT_I8MM
+           || g_hw_cpufamily == CPUFAMILY_ARM_AVALANCHE_BLIZZARD
+           || g_hw_cpufamily == CPUFAMILY_ARM_EVEREST_SAWTOOTH
+           || g_hw_cpufamily == CPUFAMILY_ARM_COLL
+           || g_hw_cpufamily == CPUFAMILY_ARM_IBIZA
+           || g_hw_cpufamily == CPUFAMILY_ARM_LOBOS
+           || g_hw_cpufamily == CPUFAMILY_ARM_PALMA;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_sve()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_sve;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps & HWCAP_SVE;
+#elif __APPLE__
+    return 0; // no known apple cpu support armv8.6 sve
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_sve2()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_sve2;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps2 & HWCAP2_SVE2;
+#elif __APPLE__
+    return 0; // no known apple cpu support armv8.6 sve2
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_svebf16()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_svebf16;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps2 & HWCAP2_SVEBF16;
+#elif __APPLE__
+    return 0; // no known apple cpu support armv8.6 svebf16
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_svei8mm()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_svei8mm;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps2 & HWCAP2_SVEI8MM;
+#elif __APPLE__
+    return 0; // no known apple cpu support armv8.6 svei8mm
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_arm_svef32mm()
+{
+    try_initialize_global_cpu_info();
+#if __aarch64__
+#if defined _WIN32
+    return g_cpu_support_arm_svef32mm;
+#elif defined __ANDROID__ || defined __linux__
+    return g_hwcaps2 & HWCAP2_SVEF32MM;
+#elif __APPLE__
+    return 0; // no known apple cpu support armv8.6 svef32mm
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_x86_avx()
+{
+    try_initialize_global_cpu_info();
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    return g_cpu_support_x86_avx;
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_x86_fma()
+{
+    try_initialize_global_cpu_info();
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    return g_cpu_support_x86_fma;
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_x86_xop()
+{
+    try_initialize_global_cpu_info();
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    return g_cpu_support_x86_xop;
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_x86_f16c()
+{
+    try_initialize_global_cpu_info();
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    return g_cpu_support_x86_f16c;
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_x86_avx2()
+{
+    try_initialize_global_cpu_info();
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    return g_cpu_support_x86_avx2;
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_x86_avx_vnni()
+{
+    try_initialize_global_cpu_info();
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    return g_cpu_support_x86_avx_vnni;
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_x86_avx512()
+{
+    try_initialize_global_cpu_info();
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    return g_cpu_support_x86_avx512;
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_x86_avx512_vnni()
+{
+    try_initialize_global_cpu_info();
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    return g_cpu_support_x86_avx512_vnni;
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_x86_avx512_bf16()
+{
+    try_initialize_global_cpu_info();
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    return g_cpu_support_x86_avx512_bf16;
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_x86_avx512_fp16()
+{
+    try_initialize_global_cpu_info();
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    return g_cpu_support_x86_avx512_fp16;
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_mips_msa()
+{
+    try_initialize_global_cpu_info();
+#if defined __ANDROID__ || defined __linux__
+#if __mips__
+    return g_hwcaps & HWCAP_MIPS_MSA;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_loongarch_lsx()
+{
+    try_initialize_global_cpu_info();
+#if defined __ANDROID__ || defined __linux__
+#if __loongarch64
+    return g_hwcaps & HWCAP_LOONGARCH_LSX;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_loongarch_lasx()
+{
+    try_initialize_global_cpu_info();
+#if defined __ANDROID__ || defined __linux__
+#if __loongarch64
+    return g_hwcaps & HWCAP_LOONGARCH_LASX;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_loongson_mmi()
+{
+    try_initialize_global_cpu_info();
+#if defined __ANDROID__ || defined __linux__
+#if __mips__
+    return g_hwcaps & HWCAP_LOONGSON_MMI;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_riscv_v()
+{
+    try_initialize_global_cpu_info();
+#if defined __ANDROID__ || defined __linux__
+#if __riscv
+    return g_hwcaps & COMPAT_HWCAP_ISA_V;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_support_riscv_zfh()
+{
+    try_initialize_global_cpu_info();
+#if defined __ANDROID__ || defined __linux__
+#if __riscv
+    // v + f does not imply zfh, but how to discover zfh properly ?
+    // upstream issue https://github.com/riscv/riscv-isa-manual/issues/414
+    return g_hwcaps & COMPAT_HWCAP_ISA_V && g_hwcaps & COMPAT_HWCAP_ISA_F;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+int cpu_riscv_vlenb()
+{
+    try_initialize_global_cpu_info();
+#if __riscv
+    if (!cpu_support_riscv_v())
+        return 0;
+
+    int a = 0;
+    asm volatile(
+        ".word  0xc22026f3  \n" // csrr  a3, vlenb
+        "mv     %0, a3      \n"
+        : "=r"(a)
+        :
+        : "memory", "a3");
+    return a;
+#else
+    return 0;
+#endif
+}
+
+int get_cpu_count()
+{
+    try_initialize_global_cpu_info();
+    return g_cpucount;
+}
+
+int get_little_cpu_count()
+{
+    try_initialize_global_cpu_info();
+    return get_cpu_thread_affinity_mask(1).num_enabled();
+}
+
+int get_big_cpu_count()
+{
+    try_initialize_global_cpu_info();
+    int big_cpu_count = get_cpu_thread_affinity_mask(2).num_enabled();
+    return big_cpu_count ? big_cpu_count : g_cpucount;
+}
+
+int get_physical_cpu_count()
+{
+    try_initialize_global_cpu_info();
+    return g_physical_cpucount;
+}
+
+int get_physical_little_cpu_count()
+{
+    try_initialize_global_cpu_info();
+    if (g_physical_cpucount == g_cpucount)
+        return get_little_cpu_count();
+
+    return g_physical_cpucount * 2 - g_cpucount;
+}
+
+int get_physical_big_cpu_count()
+{
+    try_initialize_global_cpu_info();
+    if (g_physical_cpucount == g_cpucount)
+        return get_big_cpu_count();
+
+    return g_cpucount - g_physical_cpucount;
+}
+
+int get_cpu_level2_cache_size()
+{
+    try_initialize_global_cpu_info();
+    return g_cpu_level2_cachesize;
+}
+
+int get_cpu_level3_cache_size()
+{
+    try_initialize_global_cpu_info();
+    return g_cpu_level3_cachesize;
+}
+
+int get_cpu_powersave()
+{
+    try_initialize_global_cpu_info();
+    return g_powersave;
+}
+
+int set_cpu_powersave(int powersave)
+{
+    try_initialize_global_cpu_info();
+    if (powersave < 0 || powersave > 2)
+    {
+        NCNN_LOGE("powersave %d not supported", powersave);
+        return -1;
+    }
+
+    const CpuSet& thread_affinity_mask = get_cpu_thread_affinity_mask(powersave);
+
+    int ret = set_cpu_thread_affinity(thread_affinity_mask);
+    if (ret != 0)
+        return ret;
+
+    g_powersave = powersave;
+
+    return 0;
+}
 
 const CpuSet& get_cpu_thread_affinity_mask(int powersave)
 {
+    try_initialize_global_cpu_info();
     if (powersave == 0)
-        return g_thread_affinity_mask.mask_all;
+        return g_cpu_affinity_mask_all;
 
     if (powersave == 1)
-        return g_thread_affinity_mask.mask_little;
+        return g_cpu_affinity_mask_little;
 
     if (powersave == 2)
-        return g_thread_affinity_mask.mask_big;
+        return g_cpu_affinity_mask_big;
 
     NCNN_LOGE("powersave %d not supported", powersave);
 
     // fallback to all cores anyway
-    return g_thread_affinity_mask.mask_all;
+    return g_cpu_affinity_mask_all;
 }
 
 int set_cpu_thread_affinity(const CpuSet& thread_affinity_mask)
 {
-#if defined __ANDROID__ || defined __linux__ || (defined _WIN32 && !(defined __MINGW32__))
+    try_initialize_global_cpu_info();
+#if defined __ANDROID__ || defined __linux__ || defined _WIN32
+#ifdef _OPENMP
     int num_threads = thread_affinity_mask.num_enabled();
 
-#ifdef _OPENMP
     // set affinity for each thread
     set_omp_num_threads(num_threads);
     std::vector<int> ssarets(num_threads, 0);
@@ -2170,6 +2765,62 @@ int set_cpu_thread_affinity(const CpuSet& thread_affinity_mask)
 #endif
 }
 
+int is_current_thread_running_on_a53_a55()
+{
+    try_initialize_global_cpu_info();
+#if defined __ANDROID__ || defined __linux__
+#if __aarch64__
+    if (g_cpu_is_arm_a53_a55 == 0)
+        return 0; // all non a53/a55
+
+    if (g_cpu_is_arm_a53_a55 == 1)
+        return 1; // all a53/a55
+
+    if (g_powersave == 2)
+        return 0; // big clusters
+
+    if (g_powersave == 1)
+        return 1; // little clusters
+
+    // little cores are a53/a55
+
+    // use cpuid for retrieving midr since kernel 4.7+
+    if (cpu_support_arm_cpuid())
+    {
+        unsigned int midr = get_midr_from_register();
+        if (midr)
+            return midr_is_a53_a55(midr);
+    }
+
+    // check if affinity cpuid is in the little ones
+    CpuSet thread_cs;
+    int ret = get_sched_affinity(thread_cs);
+    if (ret != 0)
+    {
+        // no affinity capability
+        return 0;
+    }
+
+    const CpuSet& little_cs = get_cpu_thread_affinity_mask(1);
+    for (int i = 0; i < g_cpucount; i++)
+    {
+        if (!thread_cs.is_enabled(i))
+            continue;
+
+        if (!little_cs.is_enabled(i))
+            return 0;
+    }
+
+    // all affinity cpuids are little core
+    return 1;
+#else
+    return 0;
+#endif // __aarch64__
+#else
+    return 0;
+#endif // defined __ANDROID__ || defined __linux__
+}
+
 int get_omp_num_threads()
 {
 #ifdef _OPENMP
@@ -2217,7 +2868,7 @@ int get_omp_thread_num()
 
 int get_kmp_blocktime()
 {
-#if defined(_OPENMP) && __clang__
+#if defined(_OPENMP) && (__clang__ || defined(_OPENMP_LLVM_RUNTIME))
     return kmp_get_blocktime();
 #else
     return 0;
@@ -2226,7 +2877,7 @@ int get_kmp_blocktime()
 
 void set_kmp_blocktime(int time_ms)
 {
-#if defined(_OPENMP) && __clang__
+#if defined(_OPENMP) && (__clang__ || defined(_OPENMP_LLVM_RUNTIME))
     kmp_set_blocktime(time_ms);
 #else
     (void)time_ms;

@@ -80,6 +80,7 @@ public:
 #endif // NCNN_STRING
 
     std::vector<custom_layer_registry_entry> custom_layer_registry;
+    std::vector<overwrite_builtin_layer_registry_entry> overwrite_builtin_layer_registry;
 
     PoolAllocator* local_blob_allocator;
     PoolAllocator* local_workspace_allocator;
@@ -125,6 +126,9 @@ static Option get_masked_option(const Option& opt, int featmask)
     opt1.use_sgemm_convolution = opt1.use_sgemm_convolution && !(featmask & (1 << 5));
     opt1.use_winograd_convolution = opt1.use_winograd_convolution && !(featmask & (1 << 6));
 
+    if (featmask & (1 << 7))
+        opt1.num_threads = 1;
+
     return opt1;
 }
 
@@ -144,6 +148,8 @@ int NetPrivate::upload_model()
     }
 
     Option opt_upload = opt;
+    opt_upload.blob_allocator = 0;
+    opt_upload.workspace_allocator = 0;
     opt_upload.blob_vkallocator = weight_vkallocator;
     opt_upload.workspace_vkallocator = weight_vkallocator;
     opt_upload.staging_vkallocator = weight_staging_vkallocator;
@@ -161,9 +167,7 @@ int NetPrivate::upload_model()
         }
     }
 
-    cmd.submit_and_wait();
-
-    return 0;
+    return cmd.submit_and_wait();
 }
 #endif // NCNN_VULKAN
 
@@ -173,31 +177,16 @@ int NetPrivate::forward_layer(int layer_index, std::vector<Mat>& blob_mats, cons
 
     //     NCNN_LOGE("forward_layer %d %s", layer_index, layer->name.c_str());
 
-    if (layer->one_blob_only)
+    // load bottom blobs
+    for (size_t i = 0; i < layer->bottoms.size(); i++)
     {
-        // load bottom blob
-        int bottom_blob_index = layer->bottoms[0];
+        int bottom_blob_index = layer->bottoms[i];
 
         if (blob_mats[bottom_blob_index].dims == 0)
         {
             int ret = forward_layer(blobs[bottom_blob_index].producer, blob_mats, opt);
             if (ret != 0)
                 return ret;
-        }
-    }
-    else
-    {
-        // load bottom blobs
-        for (size_t i = 0; i < layer->bottoms.size(); i++)
-        {
-            int bottom_blob_index = layer->bottoms[i];
-
-            if (blob_mats[bottom_blob_index].dims == 0)
-            {
-                int ret = forward_layer(blobs[bottom_blob_index].producer, blob_mats, opt);
-                if (ret != 0)
-                    return ret;
-            }
         }
     }
 
@@ -210,6 +199,7 @@ int NetPrivate::forward_layer(int layer_index, std::vector<Mat>& blob_mats, cons
         bottom_blob.dims = blob_mats[bottom_blob_index].dims;
         bottom_blob.w = blob_mats[bottom_blob_index].w;
         bottom_blob.h = blob_mats[bottom_blob_index].h;
+        bottom_blob.d = blob_mats[bottom_blob_index].d;
         bottom_blob.c = blob_mats[bottom_blob_index].c;
         bottom_blob.elempack = blob_mats[bottom_blob_index].elempack;
         bottom_blob.elemsize = blob_mats[bottom_blob_index].elemsize;
@@ -255,10 +245,10 @@ int NetPrivate::forward_layer(int layer_index, std::vector<Mat>& blob_mats, std:
 
     bool cmd_submit_and_wait = false;
 
-    if (layer->one_blob_only)
+    // load bottom blobs
+    for (size_t i = 0; i < layer->bottoms.size(); i++)
     {
-        // load bottom blob
-        int bottom_blob_index = layer->bottoms[0];
+        int bottom_blob_index = layer->bottoms[i];
 
         if (blob_mats_gpu[bottom_blob_index].dims == 0 && blob_mats[bottom_blob_index].dims == 0)
         {
@@ -301,60 +291,11 @@ int NetPrivate::forward_layer(int layer_index, std::vector<Mat>& blob_mats, std:
             }
         }
     }
-    else
-    {
-        // load bottom blobs
-        std::vector<VkMat> bottom_blobs(layer->bottoms.size());
-        for (size_t i = 0; i < layer->bottoms.size(); i++)
-        {
-            int bottom_blob_index = layer->bottoms[i];
 
-            if (blob_mats_gpu[bottom_blob_index].dims == 0 && blob_mats[bottom_blob_index].dims == 0)
-            {
-                int ret = forward_layer(blobs[bottom_blob_index].producer, blob_mats, blob_mats_gpu, cmd, opt);
-                if (ret != 0)
-                    return ret;
-            }
-
-            if (layer->support_vulkan)
-            {
-                if (blob_mats_gpu[bottom_blob_index].dims == 0)
-                {
-                    // host to buffer
-                    cmd.record_upload(blob_mats[bottom_blob_index], blob_mats_gpu[bottom_blob_index], opt);
-
-                    if (opt.lightmode)
-                    {
-                        // delete after taken in light mode
-                        blob_mats[bottom_blob_index].release();
-                    }
-                }
-            }
-            else
-            {
-                if (blob_mats[bottom_blob_index].dims == 0)
-                {
-                    Option opt_download = opt;
-                    opt_download.use_packing_layout = layer->support_packing;
-
-                    // buffer to host
-                    cmd.record_download(blob_mats_gpu[bottom_blob_index], blob_mats[bottom_blob_index], opt_download);
-
-                    if (opt.lightmode)
-                    {
-                        // delete after taken in light mode
-                        blob_mats_gpu[bottom_blob_index].release();
-                    }
-
-                    cmd_submit_and_wait = true;
-                }
-            }
-        }
-    }
-
+    int ret;
     if (cmd_submit_and_wait)
     {
-        cmd.submit_and_wait();
+        ret = cmd.submit_and_wait();
 
 #if NCNN_BENCHMARK
         std::vector<uint64_t> results(layer_index * 2);
@@ -372,9 +313,10 @@ int NetPrivate::forward_layer(int layer_index, std::vector<Mat>& blob_mats, std:
 #endif // NCNN_BENCHMARK
 
         cmd.reset();
+        if (ret != 0)
+            return ret;
     }
 
-    int ret;
     if (layer->support_vulkan)
     {
 #if NCNN_BENCHMARK
@@ -452,10 +394,10 @@ IMAGE_ALLOCATION_FAILED:
 #endif
     }
 
-    if (layer->one_blob_only)
+    // load bottom blobs
+    for (size_t i = 0; i < layer->bottoms.size(); i++)
     {
-        // load bottom blob
-        int bottom_blob_index = layer->bottoms[0];
+        int bottom_blob_index = layer->bottoms[i];
 
         if (blob_mats_gpu_image[bottom_blob_index].dims == 0 && blob_mats_gpu[bottom_blob_index].dims == 0 && blob_mats[bottom_blob_index].dims == 0)
         {
@@ -568,130 +510,11 @@ IMAGE_ALLOCATION_FAILED:
             }
         }
     }
-    else
-    {
-        // load bottom blobs
-        std::vector<VkImageMat> bottom_blobs(layer->bottoms.size());
-        for (size_t i = 0; i < layer->bottoms.size(); i++)
-        {
-            int bottom_blob_index = layer->bottoms[i];
 
-            if (blob_mats_gpu_image[bottom_blob_index].dims == 0 && blob_mats_gpu[bottom_blob_index].dims == 0 && blob_mats[bottom_blob_index].dims == 0)
-            {
-                int ret = forward_layer(blobs[bottom_blob_index].producer, blob_mats, blob_mats_gpu, blob_mats_gpu_image, cmd, opt);
-                if (ret != 0)
-                    return ret;
-            }
-
-            if (layer->support_vulkan && !image_allocation_failed)
-            {
-                if (layer->support_image_storage)
-                {
-                    if (blob_mats_gpu_image[bottom_blob_index].dims == 0)
-                    {
-                        if (blob_mats_gpu[bottom_blob_index].dims == 0)
-                        {
-                            // host to image
-                            cmd.record_upload(blob_mats[bottom_blob_index], blob_mats_gpu_image[bottom_blob_index], opt);
-
-                            if (blob_mats_gpu_image[bottom_blob_index].empty())
-                            {
-                                image_allocation_failed = true;
-                                goto IMAGE_ALLOCATION_FAILED;
-                            }
-
-                            if (opt.lightmode)
-                            {
-                                // delete after taken in light mode
-                                blob_mats[bottom_blob_index].release();
-                            }
-                        }
-                        else
-                        {
-                            // buffer to image
-                            cmd.record_buffer_to_image(blob_mats_gpu[bottom_blob_index], blob_mats_gpu_image[bottom_blob_index], opt);
-
-                            if (blob_mats_gpu_image[bottom_blob_index].empty())
-                            {
-                                image_allocation_failed = true;
-                                goto IMAGE_ALLOCATION_FAILED;
-                            }
-
-                            if (opt.lightmode)
-                            {
-                                // delete after taken in light mode
-                                blob_mats_gpu[bottom_blob_index].release();
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    if (blob_mats_gpu[bottom_blob_index].dims == 0)
-                    {
-                        if (blob_mats_gpu_image[bottom_blob_index].dims == 0)
-                        {
-                            // host to buffer
-                            cmd.record_upload(blob_mats[bottom_blob_index], blob_mats_gpu[bottom_blob_index], opt);
-
-                            if (opt.lightmode)
-                            {
-                                // delete after taken in light mode
-                                blob_mats[bottom_blob_index].release();
-                            }
-                        }
-                        else
-                        {
-                            // image to buffer
-                            cmd.record_image_to_buffer(blob_mats_gpu_image[bottom_blob_index], blob_mats_gpu[bottom_blob_index], opt);
-
-                            if (opt.lightmode)
-                            {
-                                // delete after taken in light mode
-                                blob_mats_gpu_image[bottom_blob_index].release();
-                            }
-                        }
-                    }
-                }
-            }
-            else
-            {
-                if (blob_mats[bottom_blob_index].dims == 0)
-                {
-                    if (blob_mats_gpu_image[bottom_blob_index].dims == 0)
-                    {
-                        // buffer to host
-                        cmd.record_download(blob_mats_gpu[bottom_blob_index], blob_mats[bottom_blob_index], opt);
-
-                        if (opt.lightmode)
-                        {
-                            // delete after taken in light mode
-                            blob_mats_gpu[bottom_blob_index].release();
-                        }
-
-                        cmd_submit_and_wait = true;
-                    }
-                    else
-                    {
-                        // image to host
-                        cmd.record_download(blob_mats_gpu_image[bottom_blob_index], blob_mats[bottom_blob_index], opt);
-
-                        if (opt.lightmode)
-                        {
-                            // delete after taken in light mode
-                            blob_mats_gpu_image[bottom_blob_index].release();
-                        }
-
-                        cmd_submit_and_wait = true;
-                    }
-                }
-            }
-        }
-    }
-
+    int ret;
     if (cmd_submit_and_wait)
     {
-        cmd.submit_and_wait();
+        ret = cmd.submit_and_wait();
 
 #if NCNN_BENCHMARK
         std::vector<uint64_t> results(layer_index * 2);
@@ -709,9 +532,11 @@ IMAGE_ALLOCATION_FAILED:
 #endif // NCNN_BENCHMARK
 
         cmd.reset();
+
+        if (ret != 0)
+            return ret;
     }
 
-    int ret;
     if (layer->support_vulkan && !image_allocation_failed)
     {
 #if NCNN_BENCHMARK
@@ -791,67 +616,56 @@ IMAGE_ALLOCATION_FAILED:
 
 int NetPrivate::convert_layout(Mat& bottom_blob, const Layer* layer, const Option& opt) const
 {
-    // clang-format off
-    // *INDENT-OFF*
+    if (bottom_blob.elembits() == 32)
+    {
+        // clang-format off
+        // *INDENT-OFF*
+
 #if NCNN_ARM82
-    if (opt.use_fp16_storage && cpu_support_arm_asimdhp())
-    {
-        if (bottom_blob.elembits() == 32 && layer->support_fp16_storage)
+        if (opt.use_fp16_storage && cpu_support_arm_asimdhp() && layer->support_fp16_storage)
         {
             Mat bottom_blob_fp16;
             cast_float32_to_float16(bottom_blob, bottom_blob_fp16, opt);
             bottom_blob = bottom_blob_fp16;
         }
-        if (bottom_blob.elembits() == 16 && !layer->support_fp16_storage)
-        {
-            Mat bottom_blob_fp32;
-            cast_float16_to_float32(bottom_blob, bottom_blob_fp32, opt);
-            bottom_blob = bottom_blob_fp32;
-        }
-    }
-    else
+        else
 #endif // NCNN_ARM82
-#if NCNN_RVV
-    if (opt.use_fp16_storage && cpu_support_riscv_v() && cpu_support_riscv_zfh())
-    {
-        if (bottom_blob.elembits() == 32 && layer->support_fp16_storage)
+#if NCNN_VFPV4
+        if (opt.use_fp16_storage && !opt.use_bf16_storage && cpu_support_arm_vfpv4() && layer->support_fp16_storage)
         {
             Mat bottom_blob_fp16;
             cast_float32_to_float16(bottom_blob, bottom_blob_fp16, opt);
             bottom_blob = bottom_blob_fp16;
         }
-        if (bottom_blob.elembits() == 16 && !layer->support_fp16_storage)
+        else
+#endif // NCNN_VFPV4
+#if NCNN_RVV
+        if (opt.use_fp16_storage && cpu_support_riscv_v() && cpu_support_riscv_zfh() && layer->support_fp16_storage)
         {
-            Mat bottom_blob_fp32;
-            cast_float16_to_float32(bottom_blob, bottom_blob_fp32, opt);
-            bottom_blob = bottom_blob_fp32;
+            Mat bottom_blob_fp16;
+            cast_float32_to_float16(bottom_blob, bottom_blob_fp16, opt);
+            bottom_blob = bottom_blob_fp16;
         }
-    }
-    else
+        else
 #endif // NCNN_RVV
 #if NCNN_BF16
-    if (opt.use_bf16_storage)
-    {
-        if (bottom_blob.elembits() == 32 && layer->support_bf16_storage)
+        if (opt.use_bf16_storage && layer->support_bf16_storage)
         {
             Mat bottom_blob_bf16;
             cast_float32_to_bfloat16(bottom_blob, bottom_blob_bf16, opt);
             bottom_blob = bottom_blob_bf16;
         }
-        if (bottom_blob.elembits() == 16 && !layer->support_bf16_storage)
-        {
-            Mat bottom_blob_fp32;
-            cast_bfloat16_to_float32(bottom_blob, bottom_blob_fp32, opt);
-            bottom_blob = bottom_blob_fp32;
-        }
-    }
-    else
+        else
 #endif // NCNN_BF16
-    {
-        // no type conversion
+        {
+        }
+
+        // *INDENT-ON*
+        // clang-format on
+
+        if (bottom_blob.empty())
+            return -100;
     }
-    // *INDENT-ON*
-    // clang-format on
 
     int dst_elempack = 1;
     if (opt.use_packing_layout)
@@ -925,6 +739,60 @@ int NetPrivate::convert_layout(Mat& bottom_blob, const Layer* layer, const Optio
         Mat bottom_blob_packed;
         convert_packing(bottom_blob, bottom_blob_packed, dst_elempack, opt);
         bottom_blob = bottom_blob_packed;
+
+        if (bottom_blob.empty())
+            return -100;
+    }
+
+    if (bottom_blob.elembits() == 16)
+    {
+        // clang-format off
+        // *INDENT-OFF*
+
+#if NCNN_ARM82
+        if (opt.use_fp16_storage && cpu_support_arm_asimdhp() && !layer->support_fp16_storage)
+        {
+            Mat bottom_blob_fp32;
+            cast_float16_to_float32(bottom_blob, bottom_blob_fp32, opt);
+            bottom_blob = bottom_blob_fp32;
+        }
+        else
+#endif // NCNN_ARM82
+#if NCNN_VFPV4
+        if (opt.use_fp16_storage && !opt.use_bf16_storage && cpu_support_arm_vfpv4() && !layer->support_fp16_storage)
+        {
+            Mat bottom_blob_fp32;
+            cast_float16_to_float32(bottom_blob, bottom_blob_fp32, opt);
+            bottom_blob = bottom_blob_fp32;
+        }
+        else
+#endif // NCNN_VFPV4
+#if NCNN_RVV
+        if (opt.use_fp16_storage && cpu_support_riscv_v() && cpu_support_riscv_zfh() && !layer->support_fp16_storage)
+        {
+            Mat bottom_blob_fp32;
+            cast_float16_to_float32(bottom_blob, bottom_blob_fp32, opt);
+            bottom_blob = bottom_blob_fp32;
+        }
+        else
+#endif // NCNN_RVV
+#if NCNN_BF16
+        if (opt.use_bf16_storage && !layer->support_bf16_storage)
+        {
+            Mat bottom_blob_fp32;
+            cast_bfloat16_to_float32(bottom_blob, bottom_blob_fp32, opt);
+            bottom_blob = bottom_blob_fp32;
+        }
+        else
+#endif // NCNN_BF16
+        {
+        }
+
+        // *INDENT-ON*
+        // clang-format on
+
+        if (bottom_blob.empty())
+            return -100;
     }
 
     return 0;
@@ -946,6 +814,8 @@ int NetPrivate::do_forward_layer(const Layer* layer, std::vector<Mat>& blob_mats
             if (layer->support_inplace && *bottom_blob_ref.refcount != 1)
             {
                 bottom_blob = bottom_blob_ref.clone(opt.blob_allocator);
+                if (bottom_blob.empty())
+                    return -100;
             }
         }
         if (bottom_blob.dims == 0)
@@ -953,7 +823,9 @@ int NetPrivate::do_forward_layer(const Layer* layer, std::vector<Mat>& blob_mats
             bottom_blob = bottom_blob_ref;
         }
 
-        convert_layout(bottom_blob, layer, opt);
+        int ret = convert_layout(bottom_blob, layer, opt);
+        if (ret != 0)
+            return ret;
 
         // forward
         if (opt.lightmode && layer->support_inplace)
@@ -999,6 +871,8 @@ int NetPrivate::do_forward_layer(const Layer* layer, std::vector<Mat>& blob_mats
                 if (layer->support_inplace && *bottom_blob_ref.refcount != 1)
                 {
                     bottom_blobs[i] = bottom_blob_ref.clone(opt.blob_allocator);
+                    if (bottom_blobs[i].empty())
+                        return -100;
                 }
             }
             if (bottom_blobs[i].dims == 0)
@@ -1006,7 +880,9 @@ int NetPrivate::do_forward_layer(const Layer* layer, std::vector<Mat>& blob_mats
                 bottom_blobs[i] = bottom_blob_ref;
             }
 
-            convert_layout(bottom_blobs[i], layer, opt);
+            int ret = convert_layout(bottom_blobs[i], layer, opt);
+            if (ret != 0)
+                return ret;
         }
 
         // forward
@@ -1041,12 +917,12 @@ int NetPrivate::do_forward_layer(const Layer* layer, std::vector<Mat>& blob_mats
             }
         }
 
-        for (size_t i = 0; i < layer->bottoms.size(); i++)
+        if (opt.lightmode)
         {
-            int bottom_blob_index = layer->bottoms[i];
-
-            if (opt.lightmode)
+            for (size_t i = 0; i < layer->bottoms.size(); i++)
             {
+                int bottom_blob_index = layer->bottoms[i];
+
                 // delete after taken in light mode
                 blob_mats[bottom_blob_index].release();
             }
@@ -1168,12 +1044,12 @@ int NetPrivate::do_forward_layer(const Layer* layer, std::vector<VkMat>& blob_ma
             }
         }
 
-        for (size_t i = 0; i < layer->bottoms.size(); i++)
+        if (opt.lightmode)
         {
-            int bottom_blob_index = layer->bottoms[i];
-
-            if (opt.lightmode)
+            for (size_t i = 0; i < layer->bottoms.size(); i++)
             {
+                int bottom_blob_index = layer->bottoms[i];
+
                 // delete after taken in light mode
                 blob_mats_gpu[bottom_blob_index].release();
             }
@@ -1293,12 +1169,12 @@ int NetPrivate::do_forward_layer(const Layer* layer, std::vector<VkImageMat>& bl
             }
         }
 
-        for (size_t i = 0; i < layer->bottoms.size(); i++)
+        if (opt.lightmode)
         {
-            int bottom_blob_index = layer->bottoms[i];
-
-            if (opt.lightmode)
+            for (size_t i = 0; i < layer->bottoms.size(); i++)
             {
+                int bottom_blob_index = layer->bottoms[i];
+
                 // delete after taken in light mode
                 blob_mats_gpu_image[bottom_blob_index].release();
             }
@@ -1380,8 +1256,24 @@ int Net::register_custom_layer(const char* type, layer_creator_func creator, lay
     int typeindex = layer_to_index(type);
     if (typeindex != -1)
     {
-        NCNN_LOGE("can not register build-in layer type %s", type);
-        return -1;
+        NCNN_LOGE("overwrite built-in layer type %s", type);
+
+        for (size_t i = 0; i < d->overwrite_builtin_layer_registry.size(); i++)
+        {
+            if (d->overwrite_builtin_layer_registry[i].typeindex == typeindex)
+            {
+                NCNN_LOGE("overwrite existing overwritten built-in layer index %d", typeindex);
+
+                d->overwrite_builtin_layer_registry[i].creator = creator;
+                d->overwrite_builtin_layer_registry[i].destroyer = destroyer;
+                d->overwrite_builtin_layer_registry[i].userdata = userdata;
+                return 0;
+            }
+        }
+
+        struct overwrite_builtin_layer_registry_entry entry = {typeindex, creator, destroyer, userdata};
+        d->overwrite_builtin_layer_registry.push_back(entry);
+        return 0;
     }
 
     int custom_index = custom_layer_to_index(type);
@@ -1408,8 +1300,24 @@ int Net::register_custom_layer(int index, layer_creator_func creator, layer_dest
     int custom_index = index & ~LayerType::CustomBit;
     if (index == custom_index)
     {
-        NCNN_LOGE("can not register build-in layer index %d", custom_index);
-        return -1;
+        NCNN_LOGE("overwrite built-in layer type %d", index);
+
+        for (size_t i = 0; i < d->overwrite_builtin_layer_registry.size(); i++)
+        {
+            if (d->overwrite_builtin_layer_registry[i].typeindex == index)
+            {
+                NCNN_LOGE("overwrite existing overwritten built-in layer index %d", index);
+
+                d->overwrite_builtin_layer_registry[i].creator = creator;
+                d->overwrite_builtin_layer_registry[i].destroyer = destroyer;
+                d->overwrite_builtin_layer_registry[i].userdata = userdata;
+                return 0;
+            }
+        }
+
+        struct overwrite_builtin_layer_registry_entry entry = {index, creator, destroyer, userdata};
+        d->overwrite_builtin_layer_registry.push_back(entry);
+        return 0;
     }
 
     if ((int)d->custom_layer_registry.size() <= custom_index)
@@ -1480,8 +1388,11 @@ int Net::load_param(const DataReader& dr)
         // sanitize use options
         if (!d->vkdev->info.support_fp16_packed()) opt.use_fp16_packed = false;
         if (!d->vkdev->info.support_fp16_storage()) opt.use_fp16_storage = false;
+        if (!d->vkdev->info.support_fp16_uniform()) opt.use_fp16_uniform = false;
         if (!d->vkdev->info.support_fp16_arithmetic()) opt.use_fp16_arithmetic = false;
+        if (!d->vkdev->info.support_int8_packed()) opt.use_int8_packed = false;
         if (!d->vkdev->info.support_int8_storage()) opt.use_int8_storage = false;
+        if (!d->vkdev->info.support_int8_uniform()) opt.use_int8_uniform = false;
         if (!d->vkdev->info.support_int8_arithmetic()) opt.use_int8_arithmetic = false;
         if (!d->vkdev->info.support_cooperative_matrix()) opt.use_cooperative_matrix = false;
 
@@ -1492,6 +1403,9 @@ int Net::load_param(const DataReader& dr)
 
         // fp16a makes no sense when fp16 storage disabled
         if (!opt.use_fp16_packed && !opt.use_fp16_storage) opt.use_fp16_arithmetic = false;
+
+        // fp16 uniform makes no sense when fp16 arithmetic disabled
+        if (!opt.use_fp16_arithmetic) opt.use_fp16_uniform = false;
     }
     else
     {
@@ -1514,7 +1428,17 @@ int Net::load_param(const DataReader& dr)
         SCAN_VALUE("%d", bottom_count)
         SCAN_VALUE("%d", top_count)
 
-        Layer* layer = create_layer(layer_type);
+        Layer* layer = create_overwrite_builtin_layer(layer_type);
+#if NCNN_VULKAN
+        if (!layer && opt.use_vulkan_compute && d->vkdev)
+        {
+            layer = create_layer_vulkan(layer_type);
+        }
+#endif // NCNN_VULKAN
+        if (!layer)
+        {
+            layer = create_layer_cpu(layer_type);
+        }
         if (!layer)
         {
             layer = create_custom_layer(layer_type);
@@ -1536,7 +1460,6 @@ int Net::load_param(const DataReader& dr)
         //         NCNN_LOGE("new layer %d %s", i, layer_name);
 
         layer->bottoms.resize(bottom_count);
-
         for (int j = 0; j < bottom_count; j++)
         {
             char bottom_name[256];
@@ -1580,18 +1503,14 @@ int Net::load_param(const DataReader& dr)
             blob_index++;
         }
 
+        int layer_support_vulkan = layer->support_vulkan;
+
         // layer specific params
         int pdlr = pd.load_param(dr);
         if (pdlr != 0)
         {
-            NCNN_LOGE("ParamDict load_param %d %s failed", i, layer->name.c_str());
+            NCNN_LOGE("ParamDict load_param %d %s failed", i, layer_name);
             continue;
-        }
-
-        if (layer->support_int8_storage)
-        {
-            // no int8 gpu support yet
-            opt.use_vulkan_compute = false;
         }
 
         // pull out top shape hints
@@ -1640,8 +1559,60 @@ int Net::load_param(const DataReader& dr)
         int lr = layer->load_param(pd);
         if (lr != 0)
         {
-            NCNN_LOGE("layer load_param %d %s failed", i, layer->name.c_str());
+            NCNN_LOGE("layer load_param %d %s failed", i, layer_name);
             continue;
+        }
+
+        if (layer->support_int8_storage)
+        {
+            // no int8 gpu support yet
+            opt.use_vulkan_compute = false;
+        }
+
+        Option opt1 = get_masked_option(opt, layer->featmask);
+#if NCNN_VULKAN
+        if (opt1.use_vulkan_compute)
+        {
+            if (!layer->support_image_storage) opt1.use_image_storage = false;
+        }
+#endif // NCNN_VULKAN
+
+        if (layer_support_vulkan && (!layer->support_vulkan || !opt1.use_vulkan_compute))
+        {
+            // vulkan layer cannot handle these param, recreate cpu layer
+            Layer* layer_cpu = create_overwrite_builtin_layer(layer_type);
+            if (!layer_cpu)
+            {
+                layer_cpu = create_layer_cpu(layer_type);
+            }
+            if (!layer_cpu)
+            {
+                layer_cpu = create_custom_layer(layer_type);
+            }
+            if (!layer_cpu)
+            {
+                NCNN_LOGE("layer %s not exists or registered", layer_type);
+                clear();
+                return -1;
+            }
+
+            layer_cpu->type = layer->type;
+            layer_cpu->name = layer->name;
+            layer_cpu->bottoms = layer->bottoms;
+            layer_cpu->tops = layer->tops;
+            layer_cpu->bottom_shapes = layer->bottom_shapes;
+            layer_cpu->top_shapes = layer->top_shapes;
+            layer_cpu->featmask = layer->featmask;
+
+            int lr = layer_cpu->load_param(pd);
+            if (lr != 0)
+            {
+                NCNN_LOGE("layer load_param %d %s failed", i, layer_name);
+                continue;
+            }
+
+            delete layer;
+            layer = layer_cpu;
         }
 
         d->layers[i] = layer;
@@ -1657,12 +1628,25 @@ int Net::load_param(const DataReader& dr)
 
 int Net::load_param_bin(const DataReader& dr)
 {
+#if __BIG_ENDIAN__
+#define READ_VALUE(buf)                            \
+    if (dr.read(&buf, sizeof(buf)) != sizeof(buf)) \
+    {                                              \
+        NCNN_LOGE("read " #buf " failed");         \
+        return -1;                                 \
+    }                                              \
+    if (sizeof(buf) == 2)                          \
+        swap_endianness_16(&buf);                  \
+    if (sizeof(buf) == 4)                          \
+        swap_endianness_32(&buf);
+#else
 #define READ_VALUE(buf)                            \
     if (dr.read(&buf, sizeof(buf)) != sizeof(buf)) \
     {                                              \
         NCNN_LOGE("read " #buf " failed");         \
         return -1;                                 \
     }
+#endif
 
     int magic = 0;
     READ_VALUE(magic)
@@ -1700,8 +1684,11 @@ int Net::load_param_bin(const DataReader& dr)
         // sanitize use options
         if (!d->vkdev->info.support_fp16_packed()) opt.use_fp16_packed = false;
         if (!d->vkdev->info.support_fp16_storage()) opt.use_fp16_storage = false;
+        if (!d->vkdev->info.support_fp16_uniform()) opt.use_fp16_uniform = false;
         if (!d->vkdev->info.support_fp16_arithmetic()) opt.use_fp16_arithmetic = false;
+        if (!d->vkdev->info.support_int8_packed()) opt.use_int8_packed = false;
         if (!d->vkdev->info.support_int8_storage()) opt.use_int8_storage = false;
+        if (!d->vkdev->info.support_int8_uniform()) opt.use_int8_uniform = false;
         if (!d->vkdev->info.support_int8_arithmetic()) opt.use_int8_arithmetic = false;
         if (!d->vkdev->info.support_cooperative_matrix()) opt.use_cooperative_matrix = false;
 
@@ -1712,6 +1699,9 @@ int Net::load_param_bin(const DataReader& dr)
 
         // fp16a makes no sense when fp16 storage disabled
         if (!opt.use_fp16_packed && !opt.use_fp16_storage) opt.use_fp16_arithmetic = false;
+
+        // fp16 uniform makes no sense when fp16 arithmetic disabled
+        if (!opt.use_fp16_arithmetic) opt.use_fp16_uniform = false;
     }
     else
     {
@@ -1731,7 +1721,17 @@ int Net::load_param_bin(const DataReader& dr)
         READ_VALUE(bottom_count)
         READ_VALUE(top_count)
 
-        Layer* layer = create_layer(typeindex);
+        Layer* layer = create_overwrite_builtin_layer(typeindex);
+#if NCNN_VULKAN
+        if (!layer && opt.use_vulkan_compute && d->vkdev)
+        {
+            layer = create_layer_vulkan(typeindex);
+        }
+#endif // NCNN_VULKAN
+        if (!layer)
+        {
+            layer = create_layer_cpu(typeindex);
+        }
         if (!layer)
         {
             int custom_index = typeindex & ~LayerType::CustomBit;
@@ -1782,22 +1782,14 @@ int Net::load_param_bin(const DataReader& dr)
             layer->tops[j] = top_blob_index;
         }
 
+        int layer_support_vulkan = layer->support_vulkan;
+
         // layer specific params
         int pdlr = pd.load_param_bin(dr);
         if (pdlr != 0)
         {
-#if NCNN_STRING
-            NCNN_LOGE("ParamDict load_param %d %s failed", i, layer->name.c_str());
-#else
-            NCNN_LOGE("ParamDict load_param %d failed", i);
-#endif
+            NCNN_LOGE("ParamDict load_param_bin %d failed", i);
             continue;
-        }
-
-        if (layer->support_int8_storage)
-        {
-            // no int8 gpu support yet
-            opt.use_vulkan_compute = false;
         }
 
         // pull out top blob shape hints
@@ -1846,12 +1838,59 @@ int Net::load_param_bin(const DataReader& dr)
         int lr = layer->load_param(pd);
         if (lr != 0)
         {
-#if NCNN_STRING
-            NCNN_LOGE("layer load_param %d %s failed", i, layer->name.c_str());
-#else
             NCNN_LOGE("layer load_param %d failed", i);
-#endif
             continue;
+        }
+
+        if (layer->support_int8_storage)
+        {
+            // no int8 gpu support yet
+            opt.use_vulkan_compute = false;
+        }
+
+        Option opt1 = get_masked_option(opt, layer->featmask);
+#if NCNN_VULKAN
+        if (opt1.use_vulkan_compute)
+        {
+            if (!layer->support_image_storage) opt1.use_image_storage = false;
+        }
+#endif // NCNN_VULKAN
+
+        if (layer_support_vulkan && (!layer->support_vulkan || !opt1.use_vulkan_compute))
+        {
+            // vulkan layer cannot handle these param, recreate cpu layer
+            Layer* layer_cpu = create_overwrite_builtin_layer(typeindex);
+            if (!layer_cpu)
+            {
+                layer_cpu = create_layer_cpu(typeindex);
+            }
+            if (!layer_cpu)
+            {
+                int custom_index = typeindex & ~LayerType::CustomBit;
+                layer_cpu = create_custom_layer(custom_index);
+            }
+            if (!layer_cpu)
+            {
+                NCNN_LOGE("layer %d not exists or registered", typeindex);
+                clear();
+                return -1;
+            }
+
+            layer_cpu->bottoms = layer->bottoms;
+            layer_cpu->tops = layer->tops;
+            layer_cpu->bottom_shapes = layer->bottom_shapes;
+            layer_cpu->top_shapes = layer->top_shapes;
+            layer_cpu->featmask = layer->featmask;
+
+            int lr = layer_cpu->load_param(pd);
+            if (lr != 0)
+            {
+                NCNN_LOGE("layer load_param %d failed", i);
+                continue;
+            }
+
+            delete layer;
+            layer = layer_cpu;
         }
 
         d->layers[i] = layer;
@@ -1875,6 +1914,18 @@ int Net::load_model(const DataReader& dr)
 
     // load file
     int ret = 0;
+
+#if NCNN_VULKAN
+    if (opt.use_vulkan_compute)
+    {
+        if (!opt.pipeline_cache)
+        {
+            if (!d->pipeline_cache)
+                d->pipeline_cache = new PipelineCache(d->vkdev);
+            opt.pipeline_cache = d->pipeline_cache;
+        }
+    }
+#endif // NCNN_VULKAN
 
     ModelBinFromDataReader mb(dr);
     for (int i = 0; i < layer_count; i++)
@@ -1901,41 +1952,7 @@ int Net::load_model(const DataReader& dr)
             break;
         }
 
-        if (layer->support_int8_storage)
-        {
-            // no int8 gpu support yet
-            opt.use_vulkan_compute = false;
-        }
-    }
-
-#if NCNN_VULKAN
-    if (opt.use_vulkan_compute)
-    {
-        if (!opt.pipeline_cache)
-        {
-            if (!d->pipeline_cache)
-                d->pipeline_cache = new PipelineCache(d->vkdev);
-            opt.pipeline_cache = d->pipeline_cache;
-        }
-    }
-#endif // NCNN_VULKAN
-
-    for (int i = 0; i < layer_count; i++)
-    {
-        Layer* layer = d->layers[i];
-
         Option opt1 = get_masked_option(opt, layer->featmask);
-#if NCNN_VULKAN
-        if (opt1.use_vulkan_compute)
-        {
-            if (!layer->support_image_storage) opt1.use_image_storage = false;
-        }
-        else
-        {
-            layer->vkdev = 0;
-            layer->support_vulkan = false;
-        }
-#endif // NCNN_VULKAN
 
         int cret = layer->create_pipeline(opt1);
         if (cret != 0)
@@ -1971,9 +1988,9 @@ int Net::load_model(const DataReader& dr)
     }
 
 #if NCNN_VULKAN
-    if (opt.use_vulkan_compute)
+    if (ret == 0 && opt.use_vulkan_compute)
     {
-        d->upload_model();
+        ret = d->upload_model();
     }
 #endif // NCNN_VULKAN
 
@@ -2169,7 +2186,26 @@ void Net::clear()
         }
         else
         {
-            delete layer;
+            // check overwrite builtin layer destroyer
+            int index = -1;
+            const size_t overwrite_builtin_layer_registry_entry_count = d->overwrite_builtin_layer_registry.size();
+            for (size_t i = 0; i < overwrite_builtin_layer_registry_entry_count; i++)
+            {
+                if (d->overwrite_builtin_layer_registry[i].typeindex == layer->typeindex)
+                {
+                    index = i;
+                    break;
+                }
+            }
+
+            if (index != -1 && d->overwrite_builtin_layer_registry[index].destroyer)
+            {
+                d->overwrite_builtin_layer_registry[index].destroyer(layer, d->overwrite_builtin_layer_registry[index].userdata);
+            }
+            else
+            {
+                delete layer;
+            }
         }
     }
     d->layers.clear();
@@ -2320,6 +2356,15 @@ Layer* Net::create_custom_layer(const char* type)
 
     return create_custom_layer(index);
 }
+
+Layer* Net::create_overwrite_builtin_layer(const char* type)
+{
+    int typeindex = layer_to_index(type);
+    if (typeindex == -1)
+        return 0;
+
+    return create_overwrite_builtin_layer(typeindex);
+}
 #endif // NCNN_STRING
 
 Layer* Net::create_custom_layer(int index)
@@ -2334,6 +2379,31 @@ Layer* Net::create_custom_layer(int index)
 
     Layer* layer = layer_creator(d->custom_layer_registry[index].userdata);
     layer->typeindex = ncnn::LayerType::CustomBit | index;
+    return layer;
+}
+
+Layer* Net::create_overwrite_builtin_layer(int typeindex)
+{
+    int index = -1;
+    const size_t overwrite_builtin_layer_registry_entry_count = d->overwrite_builtin_layer_registry.size();
+    for (size_t i = 0; i < overwrite_builtin_layer_registry_entry_count; i++)
+    {
+        if (d->overwrite_builtin_layer_registry[i].typeindex == typeindex)
+        {
+            index = i;
+            break;
+        }
+    }
+
+    if (index == -1)
+        return 0;
+
+    layer_creator_func layer_creator = d->overwrite_builtin_layer_registry[index].creator;
+    if (!layer_creator)
+        return 0;
+
+    Layer* layer = layer_creator(d->overwrite_builtin_layer_registry[index].userdata);
+    layer->typeindex = typeindex;
     return layer;
 }
 
@@ -2447,7 +2517,8 @@ void Extractor::set_light_mode(bool enable)
 
 void Extractor::set_num_threads(int num_threads)
 {
-    d->opt.num_threads = num_threads;
+    NCNN_LOGE("ex.set_num_threads() is no-op, please set net.opt.num_threads=N before net.load_param()");
+    NCNN_LOGE("If you want to use single thread for only some layer, see https://github.com/Tencent/ncnn/wiki/layer-feat-mask");
 }
 
 void Extractor::set_blob_allocator(Allocator* allocator)
@@ -2463,14 +2534,8 @@ void Extractor::set_workspace_allocator(Allocator* allocator)
 #if NCNN_VULKAN
 void Extractor::set_vulkan_compute(bool enable)
 {
-    if (d->net->d->opt.use_vulkan_compute)
-    {
-        d->opt.use_vulkan_compute = enable;
-    }
-    else
-    {
-        NCNN_LOGE("set_vulkan_compute failed, network use_vulkan_compute disabled");
-    }
+    NCNN_LOGE("ex.set_vulkan_compute() is no-op, please set net.opt.use_vulkan_compute=true/false before net.load_param()");
+    NCNN_LOGE("If you want to disable vulkan for only some layer, see https://github.com/Tencent/ncnn/wiki/layer-feat-mask");
 }
 
 void Extractor::set_blob_vkallocator(VkAllocator* allocator)
@@ -2597,11 +2662,11 @@ int Extractor::extract(int blob_index, Mat& feat, int type)
                 VkImageMat feat_gpu;
                 ret = extract(blob_index, feat_gpu, cmd);
 
-                if (d->blob_mats[blob_index].dims == 0 && feat_gpu.dims != 0)
+                if (ret == 0 && d->blob_mats[blob_index].dims == 0 && feat_gpu.dims != 0)
                 {
                     cmd.record_download(feat_gpu, d->blob_mats[blob_index], d->opt);
 
-                    cmd.submit_and_wait();
+                    ret = cmd.submit_and_wait();
 
 #if NCNN_BENCHMARK
                     std::vector<uint64_t> results(d->net->layers().size() * 2);
@@ -2624,11 +2689,11 @@ int Extractor::extract(int blob_index, Mat& feat, int type)
                 VkMat feat_gpu;
                 ret = extract(blob_index, feat_gpu, cmd);
 
-                if (d->blob_mats[blob_index].dims == 0 && feat_gpu.dims != 0)
+                if (ret == 0 && d->blob_mats[blob_index].dims == 0 && feat_gpu.dims != 0)
                 {
                     cmd.record_download(feat_gpu, d->blob_mats[blob_index], d->opt);
 
-                    cmd.submit_and_wait();
+                    ret = cmd.submit_and_wait();
 
 #if NCNN_BENCHMARK
                     std::vector<uint64_t> results(d->net->layers().size() * 2);
@@ -2658,53 +2723,87 @@ int Extractor::extract(int blob_index, Mat& feat, int type)
 
     feat = d->blob_mats[blob_index];
 
-    if (d->opt.use_packing_layout && (type == 0) && feat.elempack != 1)
+    // empty is valid for outputs
+    if (!feat.empty())
     {
-        Mat bottom_blob_unpacked;
-        convert_packing(feat, bottom_blob_unpacked, 1, d->opt);
-        feat = bottom_blob_unpacked;
-    }
+        if (d->opt.use_packing_layout && (type == 0) && feat.elempack != 1)
+        {
+            Mat bottom_blob_unpacked;
+            convert_packing(feat, bottom_blob_unpacked, 1, d->opt);
+            feat = bottom_blob_unpacked;
+            if (feat.empty())
+                return -100;
+        }
 
-    // clang-format off
-    // *INDENT-OFF*
+        // clang-format off
+        // *INDENT-OFF*
 #if NCNN_ARM82
-    if (d->opt.use_fp16_storage && cpu_support_arm_asimdhp() && (type == 0))
-    {
-        if (feat.elembits() == 16)
+        if (d->opt.use_fp16_storage && cpu_support_arm_asimdhp() && (type == 0))
         {
-            Mat feat_fp32;
-            cast_float16_to_float32(feat, feat_fp32, d->opt);
-            feat = feat_fp32;
+            if (feat.elembits() == 16)
+            {
+                Mat feat_fp32;
+                cast_float16_to_float32(feat, feat_fp32, d->opt);
+                feat = feat_fp32;
+            }
         }
-    }
-    else
+        else
 #endif // NCNN_ARM82
+#if NCNN_VFPV4
+        if (d->opt.use_fp16_storage && !d->opt.use_bf16_storage && cpu_support_arm_vfpv4() && (type == 0))
+        {
+            if (feat.elembits() == 16)
+            {
+                Mat feat_fp32;
+                cast_float16_to_float32(feat, feat_fp32, d->opt);
+                feat = feat_fp32;
+            }
+        }
+        else
+#endif // NCNN_VFPV4
+#if NCNN_RVV
+        if (d->opt.use_fp16_storage && cpu_support_riscv_v() && cpu_support_riscv_zfh() && (type == 0))
+        {
+            if (feat.elembits() == 16)
+            {
+                Mat feat_fp32;
+                cast_float16_to_float32(feat, feat_fp32, d->opt);
+                feat = feat_fp32;
+            }
+        }
+        else
+#endif // NCNN_RVV
 #if NCNN_BF16
-    if (d->opt.use_bf16_storage && (type == 0))
-    {
-        if (feat.elembits() == 16)
+        if (d->opt.use_bf16_storage && (type == 0))
+        {
+            if (feat.elembits() == 16)
+            {
+                Mat feat_fp32;
+                cast_bfloat16_to_float32(feat, feat_fp32, d->opt);
+                feat = feat_fp32;
+            }
+        }
+        else
+#endif // NCNN_BF16
+        if (feat.elembits() == 8 && (type == 0))
         {
             Mat feat_fp32;
-            cast_bfloat16_to_float32(feat, feat_fp32, d->opt);
+            cast_int8_to_float32(feat, feat_fp32, d->opt);
             feat = feat_fp32;
         }
-    }
-    else
-#endif // NCNN_BF16
-    if (feat.elembits() == 8 && (type == 0))
-    {
-        Mat feat_fp32;
-        cast_int8_to_float32(feat, feat_fp32, d->opt);
-        feat = feat_fp32;
-    }
-    // *INDENT-ON*
-    // clang-format on
+        // *INDENT-ON*
+        // clang-format on
+        if (feat.empty())
+            return -100;
 
-    if (d->opt.use_local_pool_allocator && feat.allocator == d->net->d->local_blob_allocator)
-    {
-        // detach the returned mat from local pool allocator
-        // so we could destroy net instance much earlier
-        feat = feat.clone();
+        if (d->opt.use_local_pool_allocator && feat.allocator == d->net->d->local_blob_allocator)
+        {
+            // detach the returned mat from local pool allocator
+            // so we could destroy net instance much earlier
+            feat = feat.clone();
+            if (feat.empty())
+                return -100;
+        }
     }
 
     set_kmp_blocktime(old_blocktime);

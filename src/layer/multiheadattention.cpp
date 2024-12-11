@@ -25,17 +25,21 @@ MultiHeadAttention::MultiHeadAttention()
 int MultiHeadAttention::load_param(const ParamDict& pd)
 {
     embed_dim = pd.get(0, 0);
-    num_head = pd.get(1, 1);
+    num_heads = pd.get(1, 1);
     weight_data_size = pd.get(2, 0);
     kdim = pd.get(3, embed_dim);
     vdim = pd.get(4, embed_dim);
+    attn_mask = pd.get(5, 0);
+    scale = pd.get(6, 1.f / sqrtf(embed_dim / num_heads));
 
     return 0;
 }
 
 int MultiHeadAttention::load_model(const ModelBin& mb)
 {
-    q_weight_data = mb.load(weight_data_size, 0);
+    const int qdim = weight_data_size / embed_dim;
+
+    q_weight_data = mb.load(embed_dim * qdim, 0);
     if (q_weight_data.empty())
         return -100;
 
@@ -59,11 +63,11 @@ int MultiHeadAttention::load_model(const ModelBin& mb)
     if (v_bias_data.empty())
         return -100;
 
-    out_weight_data = mb.load(weight_data_size, 0);
+    out_weight_data = mb.load(qdim * embed_dim, 0);
     if (out_weight_data.empty())
         return -100;
 
-    out_bias_data = mb.load(embed_dim, 1);
+    out_bias_data = mb.load(qdim, 1);
     if (out_bias_data.empty())
         return -100;
 
@@ -74,34 +78,44 @@ int MultiHeadAttention::load_model(const ModelBin& mb)
 int MultiHeadAttention::forward(const std::vector<Mat>& bottom_blobs, std::vector<Mat>& top_blobs, const Option& opt) const
 {
     const Mat& q_blob = bottom_blobs[0];
-    const Mat& k_blob = bottom_blobs.size() == 1 ? q_blob : bottom_blobs[1];
-    const Mat& v_blob = bottom_blobs.size() == 1 ? q_blob : bottom_blobs.size() == 2 ? k_blob : bottom_blobs[2];
+    const Mat& k_blob = (bottom_blobs.size() == 1 || (bottom_blobs.size() == 2 && attn_mask)) ? q_blob : bottom_blobs[1];
+    const Mat& v_blob = (bottom_blobs.size() == 1 || (bottom_blobs.size() == 2 && attn_mask)) ? q_blob : (bottom_blobs.size() == 2 || (bottom_blobs.size() == 3 && attn_mask)) ? k_blob : bottom_blobs[2];
+    const Mat& attn_mask_blob = attn_mask ? bottom_blobs[bottom_blobs.size() - 1] : Mat();
 
     const int src_seqlen = q_blob.h;
     const int dst_seqlen = k_blob.h;
-    const int embed_dim_per_head = embed_dim / num_head;
+    const int embed_dim_per_head = embed_dim / num_heads;
+    const int qdim = weight_data_size / embed_dim;
 
     // assert k_blob.h == v_blob.h
 
     Mat& top_blob = top_blobs[0];
-    top_blob.create(embed_dim, src_seqlen, 4u, opt.blob_allocator);
+    top_blob.create(qdim, src_seqlen, 4u, opt.blob_allocator);
     if (top_blob.empty())
-        return -1;
+        return -100;
 
-    Mat xq(embed_dim_per_head, src_seqlen, num_head, 4u, opt.workspace_allocator);
-    Mat xk(embed_dim_per_head, dst_seqlen, num_head, 4u, opt.workspace_allocator);
-    Mat xv(dst_seqlen, embed_dim_per_head, num_head, 4u, opt.workspace_allocator);
+    Mat xq(embed_dim_per_head, src_seqlen, num_heads, 4u, opt.workspace_allocator);
+    if (xq.empty())
+        return -100;
+    Mat xk(embed_dim_per_head, dst_seqlen, num_heads, 4u, opt.workspace_allocator);
+    if (xk.empty())
+        return -100;
+    Mat xv(dst_seqlen, embed_dim_per_head, num_heads, 4u, opt.workspace_allocator);
+    if (xv.empty())
+        return -100;
 
-    Mat xqk(dst_seqlen, src_seqlen, num_head, 4u, opt.workspace_allocator);
+    Mat xqk(dst_seqlen, src_seqlen, num_heads, 4u, opt.workspace_allocator);
+    if (xqk.empty())
+        return -100;
 
-    Mat xqkv(embed_dim_per_head, num_head, src_seqlen, 4u, opt.workspace_allocator);
-
-    const float inv_sqrt_embed_dim_per_head = 1.f / sqrt(embed_dim_per_head);
+    Mat xqkv(embed_dim_per_head, num_heads, src_seqlen, 4u, opt.workspace_allocator);
+    if (xqkv.empty())
+        return -100;
 
     #pragma omp parallel for num_threads(opt.num_threads)
-    for (int q = 0; q < num_head; q++)
+    for (int q = 0; q < num_heads; q++)
     {
-        // xq = affine(q) * inv_sqrt_embed_dim_per_head
+        // xq = affine(q) * scale
         {
             Mat outm = xq.channel(q);
 
@@ -112,15 +126,15 @@ int MultiHeadAttention::forward(const std::vector<Mat>& bottom_blobs, std::vecto
                 for (int j = 0; j < embed_dim_per_head; j++)
                 {
                     const float* ptr = q_blob.row(i);
-                    const float* kptr = (const float*)q_weight_data + embed_dim * (q * embed_dim_per_head + j);
+                    const float* kptr = (const float*)q_weight_data + qdim * (q * embed_dim_per_head + j);
 
                     float sum = q_bias_data[q * embed_dim_per_head + j];
-                    for (int k = 0; k < embed_dim; k++)
+                    for (int k = 0; k < qdim; k++)
                     {
                         sum += *ptr++ * *kptr++;
                     }
 
-                    outptr[j] = sum * inv_sqrt_embed_dim_per_head;
+                    outptr[j] = sum * scale;
                 }
             }
         }
@@ -202,6 +216,24 @@ int MultiHeadAttention::forward(const std::vector<Mat>& bottom_blobs, std::vecto
             }
         }
 
+        // xqk = xqk + mask
+        if (attn_mask)
+        {
+            const Mat& maskm = attn_mask_blob.dims == 3 ? attn_mask_blob.channel(q) : attn_mask_blob;
+            Mat outm = xqk.channel(q);
+
+            for (int i = 0; i < src_seqlen; i++)
+            {
+                const float* mptr = maskm.row(i);
+                float* outptr = outm.row(i);
+
+                for (int j = 0; j < dst_seqlen; j++)
+                {
+                    outptr[j] += mptr[j];
+                }
+            }
+        }
+
         // softmax(xqk)
         {
             Mat outm = xqk.channel(q);
@@ -219,7 +251,7 @@ int MultiHeadAttention::forward(const std::vector<Mat>& bottom_blobs, std::vecto
                 float sum = 0.f;
                 for (int j = 0; j < dst_seqlen; j++)
                 {
-                    ptr[j] = (float)(exp(ptr[j] - max));
+                    ptr[j] = (float)(expf(ptr[j] - max));
                     sum += ptr[j];
                 }
 
@@ -233,7 +265,7 @@ int MultiHeadAttention::forward(const std::vector<Mat>& bottom_blobs, std::vecto
         // xqkv = xqk * xv
         // xqk (dst_seqlen, src_seqlen)
         // xv  (dst_seqlen, embed_dim_per_head)
-        // out (embed_dim_per_head, num_head, src_seqlen)
+        // out (embed_dim_per_head, num_heads, src_seqlen)
         {
             const Mat xqkm = xqk.channel(q);
             const Mat xvm = xv.channel(q);
@@ -266,7 +298,7 @@ int MultiHeadAttention::forward(const std::vector<Mat>& bottom_blobs, std::vecto
     {
         float* outptr = top_blob.row(i);
 
-        for (int j = 0; j < embed_dim; j++)
+        for (int j = 0; j < qdim; j++)
         {
             const float* ptr = xqkv.channel(i);
             const float* kptr = (const float*)out_weight_data + embed_dim * j;

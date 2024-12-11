@@ -308,7 +308,7 @@ _RVV_FLOAT16_COS_OP(8, 2)
                                                                                                  \
         /* clamp the inputs to the range [-9, 9] since anything outside */                       \
         /* this range is -/+1.0f in single-precision.                   */                       \
-        x2 = vfmin_vf_f16m##LMUL(x, c_tanh_hi, vl);                                              \
+        x2 = vfmin_vf_f16m##LMUL(x2, c_tanh_hi, vl);                                             \
                                                                                                  \
         /* since the polynomials are odd/even, we need x**2. */                                  \
         vfloat16m##LMUL##_t z = vfmul_vv_f16m##LMUL(x2, x2, vl);                                 \
@@ -365,6 +365,19 @@ _RVV_FLOAT16_POW_OP(2, 8)
 _RVV_FLOAT16_POW_OP(4, 4)
 _RVV_FLOAT16_POW_OP(8, 2)
 
+#if C906
+#define _RVV_FLOAT16_SIGMOID_OP(LMUL, MLEN)                                                                                                \
+    static inline vfloat16m##LMUL##_t sigmoid_ps(vfloat16m##LMUL##_t _v, size_t vl)                                                        \
+    {                                                                                                                                      \
+        _v = vfneg_v_f16m##LMUL(_v, vl);                                                                                                   \
+        _v = exp_ps(_v, vl);                                                                                                               \
+        _v = vfadd_vf_f16m##LMUL(_v, 1.f, vl);                                                                                             \
+        vfloat16m##LMUL##_t _reciprocal = vfrdiv_vf_f16m##LMUL(_v, 1.f, vl);                                                               \
+        _reciprocal = vfmul_vv_f16m##LMUL(vfrsub_vf_f16m##LMUL(vfmul_vv_f16m##LMUL(_v, _reciprocal, vl), 2.f, vl), _reciprocal, vl);       \
+        /* _reciprocal = vfmul_vv_f16m##LMUL(vfrsub_vf_f16m##LMUL(vfmul_vv_f16m##LMUL(_v, _reciprocal, vl), 2.f, vl), _reciprocal, vl); */ \
+        return _reciprocal;                                                                                                                \
+    }
+#else // C906
 #define _RVV_FLOAT16_SIGMOID_OP(LMUL, MLEN)                                                                                                \
     static inline vfloat16m##LMUL##_t sigmoid_ps(vfloat16m##LMUL##_t _v, size_t vl)                                                        \
     {                                                                                                                                      \
@@ -376,6 +389,7 @@ _RVV_FLOAT16_POW_OP(8, 2)
         /* _reciprocal = vfmul_vv_f16m##LMUL(vfrsub_vf_f16m##LMUL(vfmul_vv_f16m##LMUL(_v, _reciprocal, vl), 2.f, vl), _reciprocal, vl); */ \
         return _reciprocal;                                                                                                                \
     }
+#endif // C906
 
 _RVV_FLOAT16_SIGMOID_OP(1, 16)
 _RVV_FLOAT16_SIGMOID_OP(2, 8)

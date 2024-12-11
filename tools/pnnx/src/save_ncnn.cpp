@@ -39,7 +39,11 @@ static const char* type_to_dtype_string(int type)
     if (type == 2) return "torch.double";
     if (type == 3) return "torch.half";
     if (type == 4) return "torch.int";
-    if (type == 5) return "torch.long";
+    if (type == 5)
+    {
+        fprintf(stderr, "replace ncnn input torch.long type with torch.int\n");
+        return "torch.int";
+    }
     if (type == 6) return "torch.short";
     if (type == 7) return "torch.int8";
     if (type == 8) return "torch.uint8";
@@ -395,10 +399,10 @@ int save_ncnn(const Graph& g, const std::string& parampath, const std::string& b
         fprintf(pyfp, "\n");
 
         fprintf(pyfp, "    with ncnn.Net() as net:\n");
-        fprintf(pyfp, "         net.load_param(\"%s\")\n", parampath.c_str());
-        fprintf(pyfp, "         net.load_model(\"%s\")\n", binpath.c_str());
+        fprintf(pyfp, "        net.load_param(\"%s\")\n", parampath.c_str());
+        fprintf(pyfp, "        net.load_model(\"%s\")\n", binpath.c_str());
         fprintf(pyfp, "\n");
-        fprintf(pyfp, "         with net.create_extractor() as ex:\n");
+        fprintf(pyfp, "        with net.create_extractor() as ex:\n");
 
         for (int input_index = 0;; input_index++)
         {
@@ -446,6 +450,14 @@ int save_ncnn(const Graph& g, const std::string& parampath, const std::string& b
         fprintf(pyfp, "        return out[0]\n");
         fprintf(pyfp, "    else:\n");
         fprintf(pyfp, "        return tuple(out)\n");
+    }
+
+    fprintf(pyfp, "\n");
+
+    // main
+    {
+        fprintf(pyfp, "if __name__ == \"__main__\":\n");
+        fprintf(pyfp, "    print(test_inference())\n");
     }
 
     fclose(pyfp);
