@@ -1,6 +1,9 @@
 #!/usr/bin/make -f
 include /usr/share/dpkg/default.mk
 DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+export CXX = clang++-19
+export CC = clang-19
+export DEB_LDFLAGS_MAINT_APPEND = -fuse-ld=lld
 
 %:
 	dh $@ --buildsystem=cmake

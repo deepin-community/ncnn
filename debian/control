@@ -2,24 +2,35 @@ Source: ncnn
 Section: devel
 Priority: optional
 Maintainer: Deepin Packages Builder <packages@deepin.com>
-Build-Depends: debhelper (>= 11), cmake, libvulkan-dev
+Build-Depends:
+ debhelper (>= 11),
+ cmake,
+ libvulkan-dev,
 Standards-Version: 4.1.3
 Homepage: https://github.com/Tencent/ncnn
 
 Package: libncnn
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
 Description: Neural network inference framework.
  ncnn is a high-performance neural network inference framework optimized for the mobile platform.
 
 Package: libncnn-dev
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, libncnn, libvulkan-dev
+Depends:
+ libncnn,
+ libvulkan-dev,
+ ${misc:Depends},
+ ${shlibs:Depends},
 Description: Neural network inference framework.
  ncnn is a high-performance neural network inference framework optimized for the mobile platform.
 
 Package: ncnn-tools
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
 Description: Miscellaneous ncnn utilities.
  miscellaneous ncnn utilities.

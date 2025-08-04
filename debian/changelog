@@ -1,3 +1,10 @@
+ncnn (1.0.20250503-0deepin0) unstable; urgency=medium
+
+  * Sync to Upstream
+  * Fix toolchain to llvm-19 & clang-19 to enable extra features.
+
+ -- Alex Rain <conrst3949@outlook.com>  Sun, 03 Aug 2025 12:54:57 +0800
+
 ncnn (1.0.20240820-0deepin2) unstable; urgency=medium
 
   * Sync to Upstream.
