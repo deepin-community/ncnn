@@ -39,7 +39,7 @@ jobs:
     env:
       PACKAGENAME: ncnn-${{ needs.setup.outputs.VERSION }}-full-source
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: package
@@ -68,7 +68,7 @@ jobs:
     env:
       PACKAGENAME: ncnn-${{ needs.setup.outputs.VERSION }}-${{ matrix.opt.id }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: apt
@@ -119,7 +119,7 @@ jobs:
         key: openmp-macos-release-18.1.2-20240403
     - name: checkout
       if: steps.cache-openmp.outputs.cache-hit != 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: openmp
       if: steps.cache-openmp.outputs.cache-hit != 'true'
       run: |
@@ -194,7 +194,7 @@ jobs:
         -DNCNN_VULKAN=${{ matrix.opt.vulkan }} \
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: download-openmp-macos
@@ -312,7 +312,7 @@ jobs:
         key: openmp-ios-release-18.1.2-20240403
     - name: checkout
       if: steps.cache-openmp.outputs.cache-hit != 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: openmp
       if: steps.cache-openmp.outputs.cache-hit != 'true'
       run: |
@@ -374,7 +374,7 @@ jobs:
         -DNCNN_VULKAN=${{ matrix.opt.vulkan }} \
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: download-openmp-ios
@@ -478,7 +478,7 @@ jobs:
         key: openmp-ios-simulator-release-18.1.2-20240403
     - name: checkout
       if: steps.cache-openmp.outputs.cache-hit != 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: openmp
       if: steps.cache-openmp.outputs.cache-hit != 'true'
       run: |
@@ -551,7 +551,7 @@ jobs:
         -DNCNN_VULKAN=${{ matrix.opt.vulkan }} \
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: download-openmp-ios-simulator
@@ -675,7 +675,7 @@ jobs:
         key: openmp-mac-catalyst-release-18.1.2-20240403
     - name: checkout
       if: steps.cache-openmp.outputs.cache-hit != 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: openmp
       if: steps.cache-openmp.outputs.cache-hit != 'true'
       run: |
@@ -748,7 +748,7 @@ jobs:
         -DNCNN_VULKAN=${{ matrix.opt.vulkan }} \
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: download-openmp-mac-catalyst
@@ -872,7 +872,7 @@ jobs:
         key: openmp-watchos-release-18.1.2-20240403
     - name: checkout
       if: steps.cache-openmp.outputs.cache-hit != 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: openmp
       if: steps.cache-openmp.outputs.cache-hit != 'true'
       run: |
@@ -939,7 +939,7 @@ jobs:
         -DNCNN_BUILD_BENCHMARK=OFF \
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: download-openmp-watchos
       uses: actions/download-artifact@v4
       with:
@@ -1021,7 +1021,7 @@ jobs:
         key: openmp-watchos-simulator-release-18.1.2-20240403
     - name: checkout
       if: steps.cache-openmp.outputs.cache-hit != 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: openmp
       if: steps.cache-openmp.outputs.cache-hit != 'true'
       run: |
@@ -1088,7 +1088,7 @@ jobs:
         -DNCNN_BUILD_BENCHMARK=OFF \
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: download-openmp-watchos-simulator
       uses: actions/download-artifact@v4
       with:
@@ -1170,7 +1170,7 @@ jobs:
         key: openmp-tvos-release-18.1.2-20240403
     - name: checkout
       if: steps.cache-openmp.outputs.cache-hit != 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: openmp
       if: steps.cache-openmp.outputs.cache-hit != 'true'
       run: |
@@ -1243,7 +1243,7 @@ jobs:
         -DNCNN_VULKAN=${{ matrix.opt.vulkan }} \
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: download-openmp-tvos
@@ -1367,7 +1367,7 @@ jobs:
         key: openmp-tvos-simulator-release-18.1.2-20240403
     - name: checkout
       if: steps.cache-openmp.outputs.cache-hit != 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: openmp
       if: steps.cache-openmp.outputs.cache-hit != 'true'
       run: |
@@ -1440,7 +1440,7 @@ jobs:
         -DNCNN_VULKAN=${{ matrix.opt.vulkan }} \
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: download-openmp-tvos-simulator
@@ -1564,7 +1564,7 @@ jobs:
         key: openmp-visionos-release-18.1.2-20240403
     - name: checkout
       if: steps.cache-openmp.outputs.cache-hit != 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: openmp
       if: steps.cache-openmp.outputs.cache-hit != 'true'
       run: |
@@ -1626,7 +1626,7 @@ jobs:
         -DNCNN_VULKAN=${{ matrix.opt.vulkan }} \
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: download-openmp-visionos
@@ -1730,7 +1730,7 @@ jobs:
         key: openmp-visionos-simulator-release-18.1.2-20240403
     - name: checkout
       if: steps.cache-openmp.outputs.cache-hit != 'true'
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: openmp
       if: steps.cache-openmp.outputs.cache-hit != 'true'
       run: |
@@ -1803,7 +1803,7 @@ jobs:
         -DNCNN_VULKAN=${{ matrix.opt.vulkan }} \
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: download-openmp-visionos-simulator
@@ -1926,7 +1926,7 @@ jobs:
         -DNCNN_AVX512BF16=OFF \
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: ndk-fix-debug
@@ -1977,7 +1977,7 @@ jobs:
     env:
       PACKAGENAME: ncnn-${{ needs.setup.outputs.VERSION }}-webassembly
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: emsdk
       run: |
         git clone https://github.com/emscripten-core/emsdk.git
@@ -2065,7 +2065,7 @@ jobs:
         -DNCNN_SHARED_LIB=${{ matrix.opt.shared-lib }} `
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: cache-protobuf
